@@ -214,10 +214,16 @@ def register_scheduled_tasks(app, scheduler):
             try:
                 from app.models.job import Job
 
-                reset_count = Job.reset_stale(timeout_minutes=10)
+                reset_count, abandoned_count = Job.reset_stale(timeout_minutes=10)
 
                 if reset_count > 0:
                     logger.info(f"Reset {reset_count} stale job(s) to queued status")
+
+                if abandoned_count > 0:
+                    logger.warning(
+                        f"Abandoned {abandoned_count} job(s) that repeatedly died "
+                        f"before completing"
+                    )
 
             except Exception as e:
                 logger.exception(f"Failed to reset stale jobs: {e}")

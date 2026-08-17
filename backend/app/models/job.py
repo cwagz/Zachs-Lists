@@ -4,7 +4,7 @@ Job model for MongoDB.
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from bson import ObjectId
 from pymongo import ReturnDocument
 
@@ -31,6 +31,9 @@ class Job:
     # Priority levels (lower number = higher priority)
     PRIORITY_HIGH = 1  # Default/admin jobs
     PRIORITY_NORMAL = 2  # User jobs
+
+    # Stale resets a job may accumulate before it is abandoned as unbuildable
+    MAX_STALE_ATTEMPTS = 3
 
     def __init__(self, data: Dict[str, Any]):
         self._data = data
@@ -489,24 +492,59 @@ class Job:
         return result.modified_count > 0
 
     @classmethod
-    def reset_stale(cls, timeout_minutes: int = 10) -> int:
+    def reset_stale(
+        cls, timeout_minutes: int = 10, max_attempts: int = MAX_STALE_ATTEMPTS
+    ) -> Tuple[int, int]:
         """
         Reset jobs from dead workers back to queued status.
         A job is considered stale if it's been processing for longer than
         timeout_minutes without a heartbeat update.
 
+        A job whose worker keeps dying (for example one that exhausts the
+        container memory limit every run) would otherwise be requeued forever
+        and monopolise the worker pool, so it is failed once it has burned
+        through max_attempts.
+
         Args:
             timeout_minutes: Minutes since last heartbeat before job is considered stale
+            max_attempts: Stale resets a job may accumulate before it is failed
 
         Returns:
-            Number of jobs reset
+            Tuple of (jobs requeued, jobs abandoned)
         """
         stale_threshold = datetime.utcnow() - timedelta(minutes=timeout_minutes)
-        result = mongo.db[cls.COLLECTION].update_many(
+        stale_filter = {
+            "status": cls.STATUS_PROCESSING,
+            "heartbeat_at": {"$lt": stale_threshold},
+        }
+
+        abandoned = mongo.db[cls.COLLECTION].update_many(
+            {**stale_filter, "stale_attempts": {"$gte": max_attempts}},
             {
-                "status": cls.STATUS_PROCESSING,
-                "heartbeat_at": {"$lt": stale_threshold},
+                "$set": {
+                    "status": cls.STATUS_FAILED,
+                    "worker_id": None,
+                    "claimed_at": None,
+                    "heartbeat_at": None,
+                    "completed_at": datetime.utcnow(),
+                    "result": {
+                        "sources_processed": 0,
+                        "sources_failed": 0,
+                        "total_domains": 0,
+                        "unique_domains": 0,
+                        "whitelisted_removed": 0,
+                        "output_files": [],
+                        "errors": [
+                            f"Abandoned after {max_attempts} attempts that each "
+                            f"died before completing (worker crashed or ran out of memory)"
+                        ],
+                    },
+                }
             },
+        )
+
+        requeued = mongo.db[cls.COLLECTION].update_many(
+            stale_filter,
             {
                 "$set": {
                     "status": cls.STATUS_QUEUED,
@@ -514,10 +552,12 @@ class Job:
                     "claimed_at": None,
                     "heartbeat_at": None,
                     "started_at": None,
-                }
+                },
+                "$inc": {"stale_attempts": 1},
             },
         )
-        return result.modified_count
+
+        return requeued.modified_count, abandoned.modified_count
 
     @classmethod
     def get_active(cls) -> List["Job"]:
