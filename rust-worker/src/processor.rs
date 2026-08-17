@@ -921,15 +921,17 @@ impl JobProcessor {
         // Generate all category files in parallel (with adblock passthrough)
         let mut output_files = generator.generate_all_categories(&sorted_by_category, &adblock_rules)?;
 
-        // Create combined "all domains" list (deduplicated across categories)
-        // Note: nsfw category is excluded from the combined list
+        // Create combined "all domains" list (deduplicated across categories).
+        // Note: nsfw category is excluded from the combined list.
+        // The per-category files are already written above, so consume the
+        // sorted sets and move their domains rather than cloning the lot.
         let all_domains: HashSet<String> = sorted_by_category
-            .iter()
+            .into_iter()
             .filter(|(cat, _)| {
                 // Exclude nsfw category from all_domains
                 !matches!(cat, Some(c) if c == "nsfw")
             })
-            .flat_map(|(_, domains)| domains.iter().cloned())
+            .flat_map(|(_, domains)| domains.into_iter())
             .collect();
         let all_sorted = DomainExtractor::sort_domains(all_domains);
 
