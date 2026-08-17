@@ -40,11 +40,6 @@ impl CategoryDomains {
         }
     }
 
-    /// Get all unique domains across all categories
-    pub fn all_unique(&self) -> HashSet<String> {
-        self.by_category.values().flatten().cloned().collect()
-    }
-
     /// Total domain count across all categories (deduplicated)
     pub fn total_count(&self) -> usize {
         self.by_category
@@ -498,7 +493,7 @@ impl JobProcessor {
         self.update_progress(&job.id, &progress).await?;
 
         // Stage 1: Download sources
-        let download_results = self
+        let mut download_results = self
             .download_stage(&job.id, sources, job.force_rebuild, Arc::clone(&progress))
             .await?;
 
@@ -520,7 +515,7 @@ impl JobProcessor {
 
         // Stage 2: Extract domains (organized by category)
         let category_domains = self
-            .extraction_stage(&job.id, &download_results, Arc::clone(&progress))
+            .extraction_stage(&job.id, &mut download_results, Arc::clone(&progress))
             .await?;
 
         info!(
@@ -706,17 +701,19 @@ impl JobProcessor {
     async fn extraction_stage(
         &self,
         _job_id: &bson::oid::ObjectId,
-        download_results: &[DownloadResult],
+        download_results: &mut [DownloadResult],
         progress: Arc<Mutex<JobProgress>>,
     ) -> Result<CategoryDomains> {
         let mut category_domains = CategoryDomains::new();
 
-        for result in download_results {
+        for result in download_results.iter_mut() {
             if result.error.is_some() {
                 continue;
             }
 
-            let content = match &result.content {
+            // Take ownership so the raw bytes are freed as soon as this source
+            // has been extracted, instead of staying resident for the whole job
+            let content = match result.content.take() {
                 Some(bytes) => bytes,
                 None => {
                     warn!("No content for {}", result.source.name);
@@ -724,14 +721,14 @@ impl JobProcessor {
                 }
             };
 
-            // Convert bytes to string for extraction
-            let content_str = match String::from_utf8_lossy(content) {
-                std::borrow::Cow::Borrowed(s) => s.to_string(),
-                std::borrow::Cow::Owned(s) => s,
-            };
-
             // Extract domains from content with format breakdown
-            let extraction_output = self.extractor.extract_from_content_with_breakdown(&content_str);
+            let extraction_output = {
+                let content_str = String::from_utf8_lossy(&content);
+                self.extractor
+                    .extract_from_content_with_breakdown(&content_str)
+            };
+            drop(content);
+
             let extraction_results = extraction_output.results;
             let format_breakdown = extraction_output.format_breakdown;
 
@@ -755,11 +752,14 @@ impl JobProcessor {
             let count_before = category_set.len();
 
             for extraction_result in extraction_results {
-                category_set.insert(extraction_result.domain.clone());
-                // Store raw adblock rule if present (for adblock output passthrough)
+                // Store raw adblock rule if present (for adblock output passthrough).
+                // Only adblock-sourced domains need a clone; the rest move straight in.
                 if let Some(raw_rule) = extraction_result.raw_adblock_rule {
-                    category_domains.adblock_rules.insert(extraction_result.domain, raw_rule);
+                    category_domains
+                        .adblock_rules
+                        .insert(extraction_result.domain.clone(), raw_rule);
                 }
+                category_set.insert(extraction_result.domain);
             }
 
             let new_in_category = category_set.len() - count_before;
@@ -802,9 +802,15 @@ impl JobProcessor {
         category_domains: CategoryDomains,
         progress: Arc<Mutex<JobProgress>>,
     ) -> Result<(CategoryDomains, u64, crate::db::progress::WhitelistProgress)> {
-        // Get all unique domains for global stats
-        let all_domains = category_domains.all_unique();
-        let domains_before = all_domains.len() as u64;
+        // Borrow every unique domain for global stats, without cloning them
+        let unique_domains: Vec<&String> = category_domains
+            .by_category
+            .values()
+            .flatten()
+            .collect::<HashSet<&String>>()
+            .into_iter()
+            .collect();
+        let domains_before = unique_domains.len() as u64;
 
         // Capture downloading stage snapshot before transitioning
         {
@@ -831,8 +837,9 @@ impl JobProcessor {
         let whitelist_content = self.user_config_repo.get_whitelist(username).await?;
         let whitelist = WhitelistManager::from_content(&whitelist_content);
 
-        // Filter ALL domains to get whitelist stats (pattern matches, etc.)
-        let (_, total_removed, pattern_matches) = whitelist.filter_domains(all_domains);
+        // Whitelist stats over ALL domains (pattern matches, etc.)
+        let (total_removed, pattern_matches) = whitelist.filter_stats(&unique_domains);
+        drop(unique_domains);
 
         // Filter each category separately
         let mut filtered = CategoryDomains::new();

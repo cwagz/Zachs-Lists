@@ -271,6 +271,59 @@ impl WhitelistManager {
         (remaining, removed, pattern_matches)
     }
 
+    /// Whitelist removal stats over borrowed domains, without building the
+    /// filtered set. Equivalent to the (removed, pattern_matches) half of
+    /// filter_domains, but never clones the domains it inspects.
+    pub fn filter_stats<'a>(&self, domains: &[&'a String]) -> (u64, Vec<WhitelistPatternMatch>) {
+        if self.all_patterns.is_empty() {
+            return (0, Vec::new());
+        }
+
+        let removed_domains: Vec<&&String> = domains
+            .par_iter()
+            .filter(|domain| self.is_whitelisted(domain))
+            .collect();
+
+        let removed = removed_domains.len() as u64;
+
+        debug!(
+            "Whitelist stats: {} removed (from {})",
+            removed,
+            domains.len()
+        );
+
+        use std::collections::HashMap;
+        let mut pattern_counts: HashMap<String, (String, u64)> = HashMap::new();
+
+        for p in &self.all_patterns {
+            let count = removed_domains
+                .iter()
+                .filter(|d| self.matches_pattern(d, p))
+                .count() as u64;
+
+            if count > 0 {
+                pattern_counts
+                    .entry(p.original.clone())
+                    .or_insert((p.pattern_type.to_string(), count));
+            }
+        }
+
+        let mut pattern_matches: Vec<WhitelistPatternMatch> = pattern_counts
+            .into_iter()
+            .map(|(pattern, (pattern_type, match_count))| WhitelistPatternMatch {
+                pattern,
+                pattern_type,
+                match_count,
+                samples: Vec::new(),
+            })
+            .collect();
+
+        pattern_matches.sort_by(|a, b| b.match_count.cmp(&a.match_count));
+        pattern_matches.truncate(20);
+
+        (removed, pattern_matches)
+    }
+
     /// Create progress report for whitelist stage
     pub fn create_progress(
         &self,
