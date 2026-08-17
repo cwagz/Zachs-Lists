@@ -222,6 +222,31 @@ def register_scheduled_tasks(app, scheduler):
             except Exception as e:
                 logger.exception(f"Failed to reset stale jobs: {e}")
 
+    @scheduler.scheduled_job(
+        "interval",
+        minutes=30,
+        id="prune_dead_workers",
+        name="Prune Dead Worker Registrations",
+    )
+    def prune_dead_workers():
+        """Remove liveness records left behind by workers that died abruptly.
+
+        Workers deregister themselves on clean shutdown. A worker killed
+        mid-run leaves its record behind, so anything that has not sent a
+        heartbeat in an hour is removed.
+        """
+        with app.app_context():
+            try:
+                from app.models.worker import Worker
+
+                pruned = Worker.prune_stale(stale_after_seconds=3600)
+
+                if pruned > 0:
+                    logger.info(f"Pruned {pruned} dead worker registration(s)")
+
+            except Exception as e:
+                logger.exception(f"Failed to prune dead workers: {e}")
+
     logger.info("Registered scheduled tasks")
 
 

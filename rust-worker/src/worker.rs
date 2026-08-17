@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::db::job::JobRepository;
+use crate::db::worker::WorkerRegistry;
 use crate::processor::JobProcessor;
 
 /// Worker that processes jobs from the queue
@@ -103,6 +104,12 @@ impl Worker {
 
         // Cleanup
         heartbeat_handle.abort();
+
+        let registry = WorkerRegistry::new(&self.db, self.config.worker_id.clone());
+        if let Err(e) = registry.deregister().await {
+            error!("Failed to deregister worker: {}", e);
+        }
+
         self.release_jobs(&job_repo).await?;
 
         info!("Worker {} stopped", self.config.worker_id);
@@ -118,7 +125,8 @@ impl Worker {
         let shutdown = Arc::clone(&self.shutdown);
 
         tokio::spawn(async move {
-            let job_repo = JobRepository::new(&db, worker_id);
+            let job_repo = JobRepository::new(&db, worker_id.clone());
+            let registry = WorkerRegistry::new(&db, worker_id);
             let mut ticker = interval(Duration::from_secs(heartbeat_interval));
 
             loop {
@@ -133,6 +141,10 @@ impl Worker {
                     let current = current_job.lock().await;
                     current.clone()
                 };
+
+                if let Err(e) = registry.heartbeat(job_id.as_deref()).await {
+                    error!("Worker heartbeat error: {}", e);
+                }
 
                 if let Some(job_id) = job_id {
                     match job_repo.heartbeat(&job_id).await {

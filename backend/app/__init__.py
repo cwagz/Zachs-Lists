@@ -105,7 +105,24 @@ def register_blueprints(app: Flask) -> None:
     @app.route("/health")
     @limiter.exempt
     def health_check():
-        return {"status": "healthy"}
+        from app.models.worker import Worker
+
+        stale_after = app.config.get("WORKER_STALE_AFTER_SECONDS", 60)
+
+        try:
+            workers_alive = Worker.count_alive(stale_after)
+        except Exception:
+            app.logger.exception("Health check could not read worker liveness")
+            return {"status": "unhealthy", "reason": "database unreachable"}, 503
+
+        if workers_alive == 0:
+            return {
+                "status": "degraded",
+                "reason": "no build workers alive",
+                "workers_alive": 0,
+            }, 503
+
+        return {"status": "healthy", "workers_alive": workers_alive}
 
     # SPA catch-all: serve index.html for client-side routes
     @app.route("/", defaults={"path": ""})
