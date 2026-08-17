@@ -8,11 +8,13 @@ mod whitelist;
 mod worker;
 
 use anyhow::Result;
-use mongodb::Client;
+use mongodb::{Client, Database};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{error, info, Level};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use config::Config;
@@ -67,13 +69,7 @@ async fn main() -> Result<()> {
     })?;
 
     // Connect to MongoDB
-    info!("Connecting to MongoDB at {}", config.mongo_uri);
-    let client = Client::with_uri_str(&config.mongo_uri).await?;
-    let db = client.database(&config.database_name);
-
-    // Verify connection
-    db.run_command(bson::doc! { "ping": 1 }).await?;
-    info!("Connected to MongoDB database: {}", config.database_name);
+    let db = connect_with_retry(&config).await?;
 
     // Clean up stale cache on startup
     info!("Cleaning up stale cache entries...");
@@ -99,4 +95,43 @@ async fn main() -> Result<()> {
 
     info!("Worker shutdown complete");
     Ok(())
+}
+
+async fn ping_database(config: &Config) -> Result<Database> {
+    let client = Client::with_uri_str(&config.mongo_uri).await?;
+    let db = client.database(&config.database_name);
+    db.run_command(bson::doc! { "ping": 1 }).await?;
+    Ok(db)
+}
+
+async fn connect_with_retry(config: &Config) -> Result<Database> {
+    info!("Connecting to MongoDB at {}", config.mongo_uri);
+
+    let deadline = Instant::now() + Duration::from_secs(config.mongo_connect_timeout_secs);
+    let max_backoff = Duration::from_secs(15);
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        match ping_database(config).await {
+            Ok(db) => {
+                info!("Connected to MongoDB database: {}", config.database_name);
+                return Ok(db);
+            }
+            Err(e) if Instant::now() + backoff < deadline => {
+                warn!(
+                    "MongoDB not reachable yet ({}), retrying in {:?}",
+                    e, backoff
+                );
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            Err(e) => {
+                error!(
+                    "MongoDB unreachable after {}s, giving up: {}",
+                    config.mongo_connect_timeout_secs, e
+                );
+                return Err(e);
+            }
+        }
+    }
 }
