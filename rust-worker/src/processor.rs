@@ -492,18 +492,20 @@ impl JobProcessor {
         // Update progress in DB
         self.update_progress(&job.id, &progress).await?;
 
-        // Stage 1: Download sources
-        let mut download_results = self
-            .download_stage(&job.id, sources, job.force_rebuild, Arc::clone(&progress))
+        // Stages 1 and 2: download and extract, batch by batch
+        let (download_results, category_domains) = self
+            .download_and_extract_stage(
+                &job.id,
+                sources,
+                job.force_rebuild,
+                Arc::clone(&progress),
+            )
             .await?;
 
         // Check for complete failure
-        let successful_downloads: Vec<&DownloadResult> = download_results
-            .iter()
-            .filter(|r| r.error.is_none())
-            .collect();
+        let successful_downloads = download_results.iter().filter(|r| r.error.is_none()).count();
 
-        if successful_downloads.is_empty() {
+        if successful_downloads == 0 {
             self.job_repo
                 .fail(
                     &job.id,
@@ -512,11 +514,6 @@ impl JobProcessor {
                 .await?;
             return Ok(());
         }
-
-        // Stage 2: Extract domains (organized by category)
-        let category_domains = self
-            .extraction_stage(&job.id, &mut download_results, Arc::clone(&progress))
-            .await?;
 
         info!(
             "Extracted {} unique domains across {} categories",
@@ -656,21 +653,39 @@ impl JobProcessor {
     }
 
     /// Download stage: fetch all sources in parallel
-    async fn download_stage(
+    /// Download and extract in batches, so only one batch of source content is
+    /// ever resident. Holding every source until extraction was what pushed
+    /// large configs past the container memory limit.
+    async fn download_and_extract_stage(
         &self,
         job_id: &bson::oid::ObjectId,
         sources: Vec<Source>,
         force: bool,
         progress: Arc<Mutex<JobProgress>>,
-    ) -> Result<Vec<DownloadResult>> {
-        // Download sources - the callback just logs progress, we'll update DB after
-        let results = self
-            .downloader
-            .download_sources(sources, force, |_idx, _source_progress| {
-                // Progress updates are handled after all downloads complete
-                // to avoid frequent DB writes during parallel downloads
-            })
-            .await;
+    ) -> Result<(Vec<DownloadResult>, CategoryDomains)> {
+        let batch_size = self.config.max_concurrent_downloads.max(1);
+        let mut results: Vec<DownloadResult> = Vec::with_capacity(sources.len());
+        let mut category_domains = CategoryDomains::new();
+
+        for batch in sources.chunks(batch_size) {
+            // Progress updates are handled after all downloads complete
+            // to avoid frequent DB writes during parallel downloads
+            let mut batch_results = self
+                .downloader
+                .download_sources(batch.to_vec(), force, |_idx, _source_progress| {})
+                .await;
+
+            // Extract straight away so each source's bytes are freed here
+            self.extraction_stage(
+                job_id,
+                &mut batch_results,
+                &mut category_domains,
+                Arc::clone(&progress),
+            )
+            .await?;
+
+            results.extend(batch_results);
+        }
 
         // Final progress update
         {
@@ -692,9 +707,9 @@ impl JobProcessor {
             p.processed_sources = p.sources.len() as u64;
         }
 
-        self.update_progress(&job_id, &progress).await?;
+        self.update_progress(job_id, &progress).await?;
 
-        Ok(results)
+        Ok((results, category_domains))
     }
 
     /// Extraction stage: extract domains and organize by category
@@ -702,10 +717,9 @@ impl JobProcessor {
         &self,
         _job_id: &bson::oid::ObjectId,
         download_results: &mut [DownloadResult],
+        category_domains: &mut CategoryDomains,
         progress: Arc<Mutex<JobProgress>>,
-    ) -> Result<CategoryDomains> {
-        let mut category_domains = CategoryDomains::new();
-
+    ) -> Result<()> {
         for result in download_results.iter_mut() {
             if result.error.is_some() {
                 continue;
@@ -791,7 +805,7 @@ impl JobProcessor {
             }
         }
 
-        Ok(category_domains)
+        Ok(())
     }
 
     /// Whitelist stage: filter out whitelisted domains from all categories
