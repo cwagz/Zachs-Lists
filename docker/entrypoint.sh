@@ -2,19 +2,73 @@
 set -e
 
 WORKER_COUNT=${WORKER_COUNT:-2}
-WORKER_PIDS=()
+WORKER_RESTART_DELAY=${WORKER_RESTART_DELAY:-5}
+WORKER_BIN=${WORKER_BIN:-/app/rust-worker}
+RUN_DIR=${RUN_DIR:-/tmp/blocklist-worker}
+STOP_FILE="$RUN_DIR/stop"
 
-# Start Rust workers in background
+mkdir -p "$RUN_DIR"
+rm -f "$STOP_FILE" "$RUN_DIR"/worker-*.pid
+
+SUPERVISOR_PIDS=()
+GUNICORN_PID=""
+
+supervise_worker() {
+  set +e
+  local index=$1
+  local pid_file="$RUN_DIR/worker-$index.pid"
+
+  while [ ! -f "$STOP_FILE" ]; do
+    "$WORKER_BIN" &
+    local worker_pid=$!
+    echo "$worker_pid" > "$pid_file"
+
+    wait "$worker_pid"
+    local code=$?
+    rm -f "$pid_file"
+
+    if [ -f "$STOP_FILE" ]; then
+      break
+    fi
+
+    echo "[entrypoint] rust-worker $index exited with code $code, restarting in ${WORKER_RESTART_DELAY}s" >&2
+    sleep "$WORKER_RESTART_DELAY"
+  done
+}
+
+shutdown() {
+  touch "$STOP_FILE"
+
+  for pid_file in "$RUN_DIR"/worker-*.pid; do
+    [ -f "$pid_file" ] || continue
+    kill "$(cat "$pid_file")" 2>/dev/null
+  done
+
+  for pid in "${SUPERVISOR_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null
+  done
+
+  if [ -n "$GUNICORN_PID" ]; then
+    kill -TERM "$GUNICORN_PID" 2>/dev/null
+    wait "$GUNICORN_PID" 2>/dev/null
+  fi
+
+  exit 0
+}
+
+trap shutdown SIGTERM SIGINT
+
+# Start Rust workers under supervision
 for i in $(seq 1 "$WORKER_COUNT"); do
-  /app/rust-worker &
-  WORKER_PIDS+=($!)
+  supervise_worker "$i" &
+  SUPERVISOR_PIDS+=($!)
 done
 
-# Trap signals to forward to all workers
-trap 'for pid in "${WORKER_PIDS[@]}"; do kill "$pid" 2>/dev/null; done; wait; exit 0' SIGTERM SIGINT
-
-# Start Gunicorn in foreground
+# Start Gunicorn
 cd /app/backend
-exec gunicorn \
+gunicorn \
   --config /app/docker/gunicorn.conf.py \
-  wsgi:app
+  wsgi:app &
+GUNICORN_PID=$!
+
+wait "$GUNICORN_PID"
