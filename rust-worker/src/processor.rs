@@ -47,7 +47,16 @@ impl CategoryDomains {
 
     /// Total domain count across all categories (deduplicated)
     pub fn total_count(&self) -> usize {
-        self.all_unique().len()
+        self.by_category
+            .values()
+            .flatten()
+            .collect::<HashSet<&String>>()
+            .len()
+    }
+
+    /// Check whether a domain is present in any category
+    pub fn contains(&self, domain: &str) -> bool {
+        self.by_category.values().any(|d| d.contains(domain))
     }
 
     /// Check if empty
@@ -835,9 +844,8 @@ impl JobProcessor {
         }
 
         // Copy over adblock_rules for domains that remain after whitelist filtering
-        let remaining_domains = filtered.all_unique();
         for (domain, rule) in category_domains.adblock_rules {
-            if remaining_domains.contains(&domain) {
+            if filtered.contains(&domain) {
                 filtered.adblock_rules.insert(domain, rule);
             }
         }
