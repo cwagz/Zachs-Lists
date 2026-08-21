@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# Configuration
+# =============================================================================
+# Zach's Lists Backup Script
+# Creates a complete backup of .env, ./data, and MongoDB
+# =============================================================================
+
 BACKUP_ROOT="./backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="${BACKUP_ROOT}/zachs-lists_${TIMESTAMP}"
@@ -29,18 +33,25 @@ else
 fi
 
 # 3. Backup MongoDB
-echo "→ Dumping MongoDB..."
-docker exec "${MONGO_CONTAINER}" mongodump --archive --gzip > "${BACKUP_DIR}/mongo.archive.gz"
+if docker ps --format '{{.Names}}' | grep -q "^${MONGO_CONTAINER}$"; then
+  echo "→ Dumping MongoDB (database: blocklist)..."
+  docker exec "${MONGO_CONTAINER}" mongodump --archive --gzip > "${BACKUP_DIR}/mongo.archive.gz"
+else
+  echo "❌ MongoDB container '${MONGO_CONTAINER}' is not running!"
+  echo "   Start it with: docker compose up -d"
+  exit 1
+fi
 
-# 4. Optional: also save docker-compose.yml for reference
+# 4. Save docker-compose.yml for reference
 cp docker-compose.yml "${BACKUP_DIR}/" 2>/dev/null || true
 
-# Create a simple manifest
+# Create manifest
 cat > "${BACKUP_DIR}/MANIFEST.txt" << EOF
 Zach's Lists Backup
 Created: $(date)
 Hostname: $(hostname)
 Mongo container: ${MONGO_CONTAINER}
+Database: blocklist
 EOF
 
 echo ""
@@ -49,3 +60,6 @@ echo "   Location: ${BACKUP_DIR}"
 echo ""
 echo "Contents:"
 ls -lh "${BACKUP_DIR}"
+echo ""
+echo "Tip: To make a single file for easy transfer:"
+echo "  tar -czf zachs-lists-backup_${TIMESTAMP}.tar.gz -C ${BACKUP_ROOT} zachs-lists_${TIMESTAMP}"
