@@ -1,11 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
+# =============================================================================
+# Zach's Lists Restore Script
+# Restores .env, ./data, and MongoDB from a backup created by backup-zachs-lists.sh
+# =============================================================================
+
 # Usage: ./restore-zachs-lists.sh /path/to/backup/folder
 # Example: ./restore-zachs-lists.sh ./backups/zachs-lists_20260820_183000
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <path-to-backup-directory>"
+  echo "Example: $0 ./backups/zachs-lists_20260820_183000"
   exit 1
 fi
 
@@ -34,22 +40,31 @@ if [ -f "${BACKUP_DIR}/.env" ]; then
   echo "→ Restoring .env"
   cp "${BACKUP_DIR}/.env" .env
 else
-  echo "⚠  No .env in backup — you will need to create one"
+  echo "⚠  No .env in backup — you will need to create one manually"
 fi
 
-# 2. Make sure containers are running (so we can restore into Mongo)
+# 2. Make sure containers are running
 echo "→ Ensuring containers are up..."
 docker compose up -d
 
-# Wait a few seconds for Mongo to be ready
-echo "→ Waiting for MongoDB..."
-sleep 8
+# Wait for Mongo to be ready
+echo "→ Waiting for MongoDB to become ready..."
+for i in {1..30}; do
+  if docker exec "${MONGO_CONTAINER}" mongosh --quiet --eval 'db.runCommand({ ping: 1 })' &>/dev/null; then
+    echo "   MongoDB is ready"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "❌ MongoDB did not become ready in time"
+    exit 1
+  fi
+  sleep 2
+done
 
 # 3. Restore MongoDB
 if [ -f "${BACKUP_DIR}/mongo.archive.gz" ]; then
-  echo "→ Restoring MongoDB..."
-  # Drop existing data first for a clean restore
-  docker exec "${MONGO_CONTAINER}" mongosh --eval 'db.getSiblingDB("blocklist").dropDatabase()' || true
+  echo "→ Restoring MongoDB (database: blocklist)..."
+  docker exec "${MONGO_CONTAINER}" mongosh --quiet --eval 'db.getSiblingDB("blocklist").dropDatabase()' || true
   cat "${BACKUP_DIR}/mongo.archive.gz" | docker exec -i "${MONGO_CONTAINER}" mongorestore --archive --gzip --drop
 else
   echo "⚠  No mongo.archive.gz found in backup"
@@ -71,5 +86,5 @@ docker compose up -d
 
 echo ""
 echo "✅ Restore complete!"
-echo "Give it 15–30 seconds, then open the web UI."
+echo "Give it 20–30 seconds, then open the web UI."
 echo "You should see your previous users, lists, and configurations."
