@@ -4,22 +4,42 @@ set -euo pipefail
 # =============================================================================
 # Zach's Lists Restore Script
 # Restores .env, ./data, and MongoDB from a backup created by backup-zachs-lists.sh
+# Accepts either a .tar.gz archive or an extracted backup directory
 # =============================================================================
 
-# Usage: ./restore-zachs-lists.sh /path/to/backup/folder
-# Example: ./restore-zachs-lists.sh ./backups/zachs-lists_20260820_183000
+# Usage:
+#   ./restore-zachs-lists.sh ./backups/zachs-lists_20260820_183000.tar.gz
+#   ./restore-zachs-lists.sh ./backups/zachs-lists_20260820_183000
 
 if [ $# -ne 1 ]; then
-  echo "Usage: $0 <path-to-backup-directory>"
-  echo "Example: $0 ./backups/zachs-lists_20260820_183000"
+  echo "Usage: $0 <backup.tar.gz | backup-directory>"
+  echo "Example: $0 ./backups/zachs-lists_20260820_183000.tar.gz"
   exit 1
 fi
 
-BACKUP_DIR="$1"
+INPUT="$1"
 MONGO_CONTAINER="zachs-lists-db"
+TEMP_DIR=""
 
-if [ ! -d "${BACKUP_DIR}" ]; then
-  echo "Error: Backup directory not found: ${BACKUP_DIR}"
+# Determine if input is a tar.gz or a directory
+if [ -f "${INPUT}" ] && [[ "${INPUT}" == *.tar.gz ]]; then
+  echo "→ Detected tar.gz archive"
+  TEMP_DIR=$(mktemp -d)
+  echo "→ Extracting to temporary directory..."
+  tar -xzf "${INPUT}" -C "${TEMP_DIR}"
+  # The archive contains a single top-level folder
+  BACKUP_DIR=$(find "${TEMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+elif [ -d "${INPUT}" ]; then
+  echo "→ Detected backup directory"
+  BACKUP_DIR="${INPUT}"
+else
+  echo "Error: '${INPUT}' is not a valid .tar.gz file or directory"
+  exit 1
+fi
+
+if [ -z "${BACKUP_DIR}" ] || [ ! -d "${BACKUP_DIR}" ]; then
+  echo "Error: Could not find backup contents"
+  [ -n "${TEMP_DIR}" ] && rm -rf "${TEMP_DIR}"
   exit 1
 fi
 
@@ -32,6 +52,7 @@ read -p "This will overwrite MongoDB data and ./data. Continue? (y/N) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
   echo "Aborted."
+  [ -n "${TEMP_DIR}" ] && rm -rf "${TEMP_DIR}"
   exit 1
 fi
 
@@ -56,6 +77,7 @@ for i in {1..30}; do
   fi
   if [ $i -eq 30 ]; then
     echo "❌ MongoDB did not become ready in time"
+    [ -n "${TEMP_DIR}" ] && rm -rf "${TEMP_DIR}"
     exit 1
   fi
   sleep 2
@@ -83,6 +105,9 @@ fi
 echo "→ Restarting services..."
 docker compose down
 docker compose up -d
+
+# Cleanup temp dir if we extracted a tar
+[ -n "${TEMP_DIR}" ] && rm -rf "${TEMP_DIR}"
 
 echo ""
 echo "✅ Restore complete!"
