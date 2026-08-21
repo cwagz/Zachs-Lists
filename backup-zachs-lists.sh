@@ -3,17 +3,18 @@ set -euo pipefail
 
 # =============================================================================
 # Zach's Lists Backup Script
-# Creates a complete backup of .env, ./data, and MongoDB
+# Creates a complete backup of .env, ./data, and MongoDB as a single tar.gz
 # =============================================================================
 
 BACKUP_ROOT="./backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR="${BACKUP_ROOT}/zachs-lists_${TIMESTAMP}"
+BACKUP_NAME="zachs-lists_${TIMESTAMP}"
+BACKUP_DIR="${BACKUP_ROOT}/${BACKUP_NAME}"
+ARCHIVE_FILE="${BACKUP_ROOT}/${BACKUP_NAME}.tar.gz"
 MONGO_CONTAINER="zachs-lists-db"
 DATA_DIR="./data"
 
 echo "=== Zach's Lists Backup ==="
-echo "Backup location: ${BACKUP_DIR}"
 mkdir -p "${BACKUP_DIR}"
 
 # 1. Backup .env
@@ -54,12 +55,18 @@ Mongo container: ${MONGO_CONTAINER}
 Database: blocklist
 EOF
 
+# 5. Create single tar.gz archive
+echo "→ Creating single archive: ${ARCHIVE_FILE}"
+tar -czf "${ARCHIVE_FILE}" -C "${BACKUP_ROOT}" "${BACKUP_NAME}"
+
+# Clean up the intermediate folder
+rm -rf "${BACKUP_DIR}"
+
 echo ""
 echo "✅ Backup complete!"
-echo "   Location: ${BACKUP_DIR}"
+echo "   Archive: ${ARCHIVE_FILE}"
 echo ""
-echo "Contents:"
-ls -lh "${BACKUP_DIR}"
+ls -lh "${ARCHIVE_FILE}"
 echo ""
-echo "Tip: To make a single file for easy transfer:"
-echo "  tar -czf zachs-lists-backup_${TIMESTAMP}.tar.gz -C ${BACKUP_ROOT} zachs-lists_${TIMESTAMP}"
+echo "Transfer this single file to the new machine, then run:"
+echo "  ./restore-zachs-lists.sh ${ARCHIVE_FILE}"
