@@ -15,6 +15,7 @@ class Config:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
     PERMANENT_SESSION_LIFETIME = timedelta(days=7)
+    MAX_CONTENT_LENGTH = 12 * 1024 * 1024
 
     # MongoDB
     MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/pihole_lists")
@@ -58,6 +59,11 @@ class Config:
     # Rate limiting
     RATELIMIT_DEFAULT = "100/hour"
     RATELIMIT_STORAGE_URL = os.environ.get("REDIS_URL", "memory://")
+    TRUSTED_PROXY_HOSTS = tuple(
+        host.strip()
+        for host in os.environ.get("TRUSTED_PROXY_HOSTS", "").split(",")
+        if host.strip()
+    )
 
     # Analytics
     GEOIP_DATABASE_PATH = os.environ.get("GEOIP_DATABASE_PATH", "")
