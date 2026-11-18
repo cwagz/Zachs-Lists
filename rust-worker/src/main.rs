@@ -1,4 +1,5 @@
 mod allowlist_files;
+mod allowlist_render;
 mod build_stamp;
 mod config;
 mod db;

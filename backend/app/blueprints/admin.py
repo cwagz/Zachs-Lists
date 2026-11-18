@@ -12,8 +12,11 @@ from app.models.job import Job
 from app.models.cache import CacheMetadata
 from app.models.analytics import Analytics
 from app.models.system_config import SystemConfig
+from app.allowlist_catalog import LIST_TYPE_ALLOW, LIST_TYPE_BLOCK, LIST_TYPES
+from app.allowlist_selection import resolve_allowlist_selection
 from app.services.allowlist_publish import sync_default_allowlist
-from app.utils.validators import validate_whitelist
+from app.services.allowlist_seed import ensure_allowlist_catalog
+from app.utils.validators import validate_url, validate_whitelist
 from app.models.blocklist_library import BlocklistLibrary
 from app.models.announcement import Announcement
 
@@ -473,6 +476,10 @@ def get_default_config(admin: User):
             "config": config_data["blocklists"],
             "whitelist": config_data["whitelist"],
             "publish_allowlist": config_data["publish_allowlist"],
+            "apply_whitelist_to_blocklists": config_data[
+                "apply_whitelist_to_blocklists"
+            ],
+            "allowlist_sources": config_data["allowlist_sources"],
         }
     )
 
@@ -486,6 +493,9 @@ def update_default_config(admin: User):
     publish_allowlist = data.get("publish_allowlist")
     if "publish_allowlist" in data and not isinstance(publish_allowlist, bool):
         return jsonify({"error": "publish_allowlist must be a boolean"}), 400
+    apply_whitelist = data.get("apply_whitelist_to_blocklists")
+    if "apply_whitelist_to_blocklists" in data and not isinstance(apply_whitelist, bool):
+        return jsonify({"error": "apply_whitelist_to_blocklists must be a boolean"}), 400
     if "whitelist" in data:
         whitelist = data.get("whitelist", "")
         if not isinstance(whitelist, str):
@@ -510,11 +520,46 @@ def update_default_config(admin: User):
             f"Admin {admin.username} set default publish_allowlist={publish_allowlist}"
         )
 
-    if "whitelist" in data or "publish_allowlist" in data:
+    if isinstance(apply_whitelist, bool):
+        SystemConfig.set_apply_whitelist_to_blocklists(apply_whitelist, admin.username)
+        current_app.logger.info(
+            "Admin "
+            f"{admin.username} set default apply_whitelist_to_blocklists={apply_whitelist}"
+        )
+
+    if "allowlist_source_urls" in data:
+        ensure_allowlist_catalog()
+        catalog = [
+            {
+                "url": entry.url,
+                "name": entry.name,
+                "license": entry.license,
+                "project_url": entry.project_url,
+            }
+            for entry in BlocklistLibrary.get_allowlists()
+        ]
+        selected, error = resolve_allowlist_selection(
+            data.get("allowlist_source_urls"), catalog, 1000
+        )
+        if error:
+            return jsonify({"error": error}), 400
+        SystemConfig.set_allowlist_sources(selected, admin.username)
+
+    if (
+        "whitelist" in data
+        or "publish_allowlist" in data
+        or "allowlist_source_urls" in data
+    ):
         sync_default_allowlist()
 
+    saved = SystemConfig.get_default_config()
     return jsonify(
-        {"success": True, "publish_allowlist": SystemConfig.is_allowlist_published()}
+        {
+            "success": True,
+            "publish_allowlist": saved["publish_allowlist"],
+            "apply_whitelist_to_blocklists": saved["apply_whitelist_to_blocklists"],
+            "allowlist_sources": saved["allowlist_sources"],
+        }
     )
 
 
@@ -744,6 +789,7 @@ def deny_limit_request(admin: User, request_id: str):
 @admin_required
 def get_library(admin: User):
     """Get all blocklist library entries."""
+    ensure_allowlist_catalog()
     category = request.args.get("category")
 
     if category:
@@ -767,33 +813,39 @@ def add_library_entry(admin: User):
 
     url = data.get("url", "").strip()
     name = data.get("name", "").strip()
-    category = data.get("category", "").strip()
     description = data.get("description", "").strip()
     recommended = data.get("recommended", False)
     aggressiveness = data.get("aggressiveness", 3)
     domain_count = data.get("domain_count", 0)
+    list_type = data.get("list_type", LIST_TYPE_BLOCK)
+    license_name = data.get("license", "")
+    project_url = data.get("project_url", "")
 
     # Validate required fields
     if not url:
         return jsonify({"error": "URL is required"}), 400
     if not name:
         return jsonify({"error": "Name is required"}), 400
-    if not category:
-        return jsonify({"error": "Category is required"}), 400
+    parsed_type, type_error = _library_type_fields(list_type, license_name, project_url)
+    if type_error or parsed_type is None:
+        return jsonify({"error": type_error or "Invalid list type"}), 400
+    list_type, license_name, project_url = parsed_type
 
-    # Validate category
-    if category not in BlocklistLibrary.VALID_CATEGORIES:
-        return (
-            jsonify(
-                {
-                    "error": f"Invalid category. Must be one of: {', '.join(sorted(BlocklistLibrary.VALID_CATEGORIES))}"
-                }
-            ),
-            400,
-        )
-
-    # Validate URL format
-    from app.utils.validators import validate_url
+    if list_type == LIST_TYPE_ALLOW:
+        category = ""
+    else:
+        category = data.get("category", "").strip()
+        if not category:
+            return jsonify({"error": "Category is required"}), 400
+        if category not in BlocklistLibrary.VALID_CATEGORIES:
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid category. Must be one of: {', '.join(sorted(BlocklistLibrary.VALID_CATEGORIES))}"
+                    }
+                ),
+                400,
+            )
 
     if not validate_url(url):
         return jsonify({"error": "Invalid or unsafe URL"}), 400
@@ -812,6 +864,9 @@ def add_library_entry(admin: User):
         aggressiveness=aggressiveness,
         domain_count=domain_count,
         added_by=admin.username,
+        list_type=list_type,
+        license=license_name,
+        project_url=project_url,
     )
 
     current_app.logger.info(
@@ -850,8 +905,18 @@ def update_library_entry(admin: User, entry_id: str):
 
     data = request.get_json()
 
-    # Validate category if provided
-    if "category" in data and data["category"] not in BlocklistLibrary.VALID_CATEGORIES:
+    list_type = data.get("list_type", entry.list_type)
+    license_name = data.get("license", entry.license)
+    project_url = data.get("project_url", entry.project_url)
+    parsed_type, type_error = _library_type_fields(list_type, license_name, project_url)
+    if type_error or parsed_type is None:
+        return jsonify({"error": type_error or "Invalid list type"}), 400
+    list_type, license_name, project_url = parsed_type
+
+    # Validate category if provided. Allow entries are not blocklist categories.
+    if list_type == LIST_TYPE_BLOCK and "category" in data and (
+        data["category"] not in BlocklistLibrary.VALID_CATEGORIES
+    ):
         return (
             jsonify(
                 {
@@ -863,8 +928,6 @@ def update_library_entry(admin: User, entry_id: str):
 
     # Validate URL if provided
     if "url" in data:
-        from app.utils.validators import validate_url
-
         if not validate_url(data["url"]):
             return jsonify({"error": "Invalid or unsafe URL"}), 400
         # Check for duplicate URL (excluding current entry)
@@ -875,11 +938,14 @@ def update_library_entry(admin: User, entry_id: str):
     entry.update(
         url=data.get("url"),
         name=data.get("name"),
-        category=data.get("category"),
+        category="" if list_type == LIST_TYPE_ALLOW else data.get("category"),
         description=data.get("description"),
         recommended=data.get("recommended"),
         aggressiveness=data.get("aggressiveness"),
         domain_count=data.get("domain_count"),
+        list_type=list_type,
+        license=license_name,
+        project_url=project_url,
     )
 
     current_app.logger.info(f"Admin {admin.username} updated library entry: {entry_id}")
@@ -910,6 +976,19 @@ def delete_library_entry(admin: User, entry_id: str):
     )
 
     return jsonify({"success": True})
+
+
+def _library_type_fields(
+    list_type: object, license_name: object, project_url: object
+) -> tuple[tuple[str, str, str] | None, str | None]:
+    if list_type not in LIST_TYPES:
+        return None, "Invalid list type. Must be block or allow"
+    if not isinstance(license_name, str) or not isinstance(project_url, str):
+        return None, "License and project URL must be text"
+    project = project_url.strip()
+    if project and not validate_url(project):
+        return None, "Invalid or unsafe project URL"
+    return (str(list_type), license_name.strip(), project), None
 
 
 # Announcement Management

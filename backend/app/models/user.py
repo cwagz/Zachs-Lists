@@ -193,13 +193,16 @@ class User:
         return os.path.join(self.get_output_dir(), filename)
 
     def get_config_hash(self) -> str:
-        """Compute SHA256 hash of blocklists.conf + whitelist.txt for change detection."""
-        import hashlib
+        """Hash of the inputs that decide whether a manual build can be skipped."""
+        from app.allowlist_selection import config_hash
 
-        blocklists = self.get_config("blocklists.conf") or ""
-        whitelist = self.get_config("whitelist.txt") or ""
-        combined = f"{blocklists}\n---SEPARATOR---\n{whitelist}"
-        return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+        return config_hash(
+            self.get_config("blocklists.conf") or "",
+            self.get_config("whitelist.txt") or "",
+            self.allowlist_sources,
+            self.apply_whitelist_to_blocklists,
+            self.publish_allowlist,
+        )
 
     # Config methods
     CONFIG_SCHEMA_VERSION = 1
@@ -287,6 +290,58 @@ class User:
         if not isinstance(self._data.get("config"), dict):
             self._data["config"] = {}
         self._data["config"]["publish_allowlist"] = enabled
+
+    @property
+    def allowlist_sources(self) -> List[Dict[str, str]]:
+        """Allowlist catalog entries this user opted into. Default is none."""
+        from app.allowlist_selection import normalize_allowlist_sources
+
+        return normalize_allowlist_sources(self.config.get("allowlist_sources"))
+
+    def set_allowlist_sources(self, sources: List[Dict[str, str]]) -> None:
+        """Store the opted-in allowlist sources. An empty list selects none."""
+        from app.allowlist_selection import normalize_allowlist_sources
+
+        stored = normalize_allowlist_sources(sources)
+        mongo.db[self.COLLECTION].update_one(
+            {"_id": self._id},
+            {
+                "$set": {
+                    "config.allowlist_sources": stored,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        if not isinstance(self._data.get("config"), dict):
+            self._data["config"] = {}
+        self._data["config"]["allowlist_sources"] = stored
+
+    @property
+    def apply_whitelist_to_blocklists(self) -> bool:
+        """Whether whitelist patterns remove domains from published blocklists.
+
+        Missing values stay on, which is the historical behavior.
+        """
+        from app.allowlist_selection import apply_whitelist_enabled
+
+        return apply_whitelist_enabled(
+            self.config.get("apply_whitelist_to_blocklists")
+        )
+
+    def set_apply_whitelist_to_blocklists(self, enabled: bool) -> None:
+        """Store the blocklist-filtering toggle. Default is on when unset."""
+        mongo.db[self.COLLECTION].update_one(
+            {"_id": self._id},
+            {
+                "$set": {
+                    "config.apply_whitelist_to_blocklists": enabled,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        if not isinstance(self._data.get("config"), dict):
+            self._data["config"] = {}
+        self._data["config"]["apply_whitelist_to_blocklists"] = enabled
 
     # List methods
     def get_list(self, name: str) -> Optional[Dict[str, Any]]:

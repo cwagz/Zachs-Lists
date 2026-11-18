@@ -4,10 +4,12 @@ import { userApi } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 import {
   AdvancedConfigEditor,
+  AllowlistSourcePicker,
   VisualConfigEditor,
   WhitelistEditor,
   ValidationResult as ConfigValidationResult,
 } from '../components/config';
+import { LibraryEntry } from '../components/config/types';
 import { useValidationSocket } from '../hooks/useSocket';
 
 const EDITOR_MODE_KEY = 'blocklist-editor-mode';
@@ -33,6 +35,11 @@ export default function ConfigPage() {
   const [localWhitelist, setLocalWhitelist] = useState(whitelist);
   const [publishAllowlist, setPublishAllowlist] = useState(false);
   const [localPublishAllowlist, setLocalPublishAllowlist] = useState(false);
+  const [applyWhitelist, setApplyWhitelist] = useState(true);
+  const [localApplyWhitelist, setLocalApplyWhitelist] = useState(true);
+  const [allowlistCatalog, setAllowlistCatalog] = useState<LibraryEntry[]>([]);
+  const [allowlistSources, setAllowlistSources] = useState<string[]>([]);
+  const [savingAllowlists, setSavingAllowlists] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -64,17 +71,26 @@ export default function ConfigPage() {
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const [configData, whitelistData] = await Promise.all([
+        const [configData, whitelistData, libraryData] = await Promise.all([
           userApi.getConfig(),
           userApi.getWhitelist(),
+          userApi.getLibrary().catch(() => ({ allowlists: [] })),
         ]);
         const published = Boolean(whitelistData.publish_allowlist);
+        const apply = whitelistData.apply_whitelist_to_blocklists !== false;
+        const selected = Array.isArray(whitelistData.allowlist_sources)
+          ? whitelistData.allowlist_sources.map((source: { url: string }) => source.url)
+          : [];
         setConfig(configData.config || '');
         setWhitelist(whitelistData.whitelist || '');
         setPublishAllowlist(published);
+        setApplyWhitelist(apply);
+        setAllowlistSources(selected);
+        setAllowlistCatalog(libraryData.allowlists || []);
         setLocalConfig(configData.config || '');
         setLocalWhitelist(whitelistData.whitelist || '');
         setLocalPublishAllowlist(published);
+        setLocalApplyWhitelist(apply);
       } catch (error) {
         console.error('Failed to fetch config:', error);
         setMessage({ type: 'error', text: 'Failed to load configuration' });
@@ -89,15 +105,19 @@ export default function ConfigPage() {
     const isChanged =
       (activeTab === 'blocklists' && localConfig !== config) ||
       (activeTab === 'whitelist' &&
-        (localWhitelist !== whitelist || localPublishAllowlist !== publishAllowlist));
+        (localWhitelist !== whitelist ||
+          localPublishAllowlist !== publishAllowlist ||
+          localApplyWhitelist !== applyWhitelist));
     setHasChanges(isChanged);
   }, [
     localConfig,
     localWhitelist,
     localPublishAllowlist,
+    localApplyWhitelist,
     config,
     whitelist,
     publishAllowlist,
+    applyWhitelist,
     activeTab,
   ]);
 
@@ -156,9 +176,10 @@ export default function ConfigPage() {
         await userApi.updateConfig(localConfig, validationToken!);
         setConfig(localConfig);
       } else {
-        await userApi.updateWhitelist(localWhitelist, localPublishAllowlist);
+        await userApi.updateWhitelist(localWhitelist, localPublishAllowlist, localApplyWhitelist);
         setWhitelist(localWhitelist);
         setPublishAllowlist(localPublishAllowlist);
+        setApplyWhitelist(localApplyWhitelist);
       }
       setMessage({ type: 'success', text: 'Configuration saved successfully' });
       setHasChanges(false);
@@ -194,12 +215,15 @@ export default function ConfigPage() {
         userApi.getWhitelist(),
       ]);
       const published = Boolean(whitelistData.publish_allowlist);
+      const apply = whitelistData.apply_whitelist_to_blocklists !== false;
       setConfig(configData.config || '');
       setWhitelist(whitelistData.whitelist || '');
       setPublishAllowlist(published);
+      setApplyWhitelist(apply);
       setLocalConfig(configData.config || '');
       setLocalWhitelist(whitelistData.whitelist || '');
       setLocalPublishAllowlist(published);
+      setLocalApplyWhitelist(apply);
       setMessage({ type: 'success', text: 'Default template copied successfully' });
     } catch (error) {
       console.error('Failed to copy template:', error);
@@ -215,6 +239,7 @@ export default function ConfigPage() {
     } else {
       setLocalWhitelist(whitelist);
       setLocalPublishAllowlist(publishAllowlist);
+      setLocalApplyWhitelist(applyWhitelist);
     }
     setHasChanges(false);
     setValidationResult(null);
@@ -363,6 +388,30 @@ export default function ConfigPage() {
                 placeholder="# Enter blocklist sources here&#10;https://example.com/blocklist.txt|my_blocklist|advertising"
               />
             )}
+            <AllowlistSourcePicker
+              key={allowlistSources.join('|')}
+              entries={allowlistCatalog}
+              selectedUrls={allowlistSources}
+              saving={savingAllowlists}
+              onSave={async (urls) => {
+                setSavingAllowlists(true);
+                setMessage(null);
+                try {
+                  const result = await userApi.updateAllowlistSources(urls);
+                  const selected = Array.isArray(result.allowlist_sources)
+                    ? result.allowlist_sources.map((source: { url: string }) => source.url)
+                    : urls;
+                  setAllowlistSources(selected);
+                  setMessage({ type: 'success', text: 'Allowlist sources saved' });
+                } catch (error: any) {
+                  const errorMsg = error.response?.data?.error || 'Failed to save allowlist sources';
+                  setMessage({ type: 'error', text: errorMsg });
+                  throw error;
+                } finally {
+                  setSavingAllowlists(false);
+                }
+              }}
+            />
           </div>
         ) : (
           <div className="space-y-4">
@@ -387,6 +436,23 @@ export default function ConfigPage() {
                 <span className="block text-yellow-500 mt-1">
                   Like your blocklists, this allowlist is readable by anyone who can reach this
                   instance. It contains your whitelist entries.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 text-sm text-pihole-text cursor-pointer">
+              <input
+                type="checkbox"
+                checked={localApplyWhitelist}
+                onChange={(event) => setLocalApplyWhitelist(event.target.checked)}
+                className="mt-1 rounded border-pihole-border bg-pihole-dark text-pihole-accent focus:ring-pihole-accent"
+              />
+              <span>
+                <span className="font-medium">Apply whitelist to blocklists</span>
+                <span className="block text-pihole-text-muted mt-1">
+                  On by default. Whitelist patterns are removed from your blocklists. Turn this off
+                  to publish deduplicated blocklists and send whitelist entries only to the
+                  allowlist, so Pi-hole resolves block versus allow. Publish the allowlist when this
+                  is off, or the whitelist will not apply anywhere.
                 </span>
               </span>
             </label>
@@ -480,6 +546,7 @@ export default function ConfigPage() {
                 <code className="text-pihole-accent">/^ads?\d*\./</code> - Regex pattern
               </li>
               <li>Lines starting with # are comments</li>
+              <li>Allowlist sources are optional and stay unselected until you opt in</li>
             </ul>
           </div>
         </div>

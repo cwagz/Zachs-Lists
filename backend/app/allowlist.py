@@ -7,6 +7,8 @@ Regex, wildcards inside the rule, and ``$`` modifiers are not supported.
 
 import gzip
 import os
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,29 @@ _KIND_WILDCARD_SUBDOMAIN = "wildcard_subdomain"
 _KIND_UNSUPPORTED = "unsupported"
 _KIND_REGEX = "regex"
 _PLAIN = "plain"
+_EXCEPTION_RULE = re.compile(r"^@@\|\|([^/\s$|^]+)\^$")
+
+
+@dataclass(frozen=True)
+class AllowlistSourceText:
+    """One subscribed allowlist body. ``error`` means the download failed."""
+
+    name: str
+    url: str
+    license: str
+    project_url: str = ""
+    text: str = ""
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceSummary:
+    name: str
+    url: str
+    license: str
+    project_url: str
+    kept: int
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,11 +87,62 @@ def parse_whitelist(whitelist: str) -> list[ParsedWhitelistEntry]:
     return entries
 
 
+def source_line_token(line: str) -> str | None:
+    """Return a source rule token, or None when the line is blank or a comment."""
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#!;[":
+        return None
+    for marker in (" #", " !", "\t#", "\t!"):
+        if marker in stripped:
+            stripped = stripped.split(marker, 1)[0].strip()
+            break
+    return stripped or None
+
+
+def compatible_allow_rule(token: str) -> str | None:
+    """Pi-hole v6 subscribed allowlists accept an exact domain or ``@@||domain^``."""
+    if any(character.isspace() for character in token):
+        return None
+    lowered = token.lower()
+    exception = _EXCEPTION_RULE.fullmatch(lowered)
+    if exception:
+        domain = exception.group(1)
+        if validate_domain(domain):
+            return f"@@||{domain}^"
+        return None
+    if "*" in lowered or lowered.startswith(("@@", "||")):
+        return None
+    if validate_domain(lowered):
+        return lowered
+    return None
+
+
+def filter_allowlist_source(text: str) -> tuple[list[str], int]:
+    """Keep compatible rules in file order. The int is unsupported lines dropped."""
+    rules: list[str] = []
+    seen: set[str] = set()
+    dropped = 0
+    for line in text.splitlines():
+        token = source_line_token(line)
+        if token is None:
+            continue
+        rule = compatible_allow_rule(token)
+        if rule is None:
+            dropped += 1
+            continue
+        if rule in seen:
+            continue
+        seen.add(rule)
+        rules.append(rule)
+    return rules, dropped
+
+
 def render_allowlist(
     whitelist: str,
     output_format: str,
     generated_at: datetime,
     generator: str | None = None,
+    sources: Sequence[AllowlistSourceText] | None = None,
 ) -> str:
     if output_format not in ALLOWLIST_FORMATS:
         raise ValueError(f"Unsupported allowlist format: {output_format}")
@@ -78,6 +154,7 @@ def render_allowlist(
     omitted_subdomains: list[str] = []
     unsupported: list[str] = []
     regexes: list[str] = []
+    user_kept = 0
 
     for entry in entries:
         if entry.kind == _KIND_REGEX:
@@ -97,6 +174,45 @@ def render_allowlist(
             continue
         seen_rules.add(rule)
         rules.append(rule)
+        user_kept += 1
+
+    summaries: list[SourceSummary] | None = None
+    dropped = 0
+    if sources:
+        summaries = []
+        for source in sources:
+            if source.error:
+                summaries.append(
+                    SourceSummary(
+                        name=source.name,
+                        url=source.url,
+                        license=source.license,
+                        project_url=source.project_url,
+                        kept=0,
+                        error=source.error,
+                    )
+                )
+                continue
+            source_rules, source_dropped = filter_allowlist_source(source.text)
+            dropped += source_dropped
+            kept = 0
+            for rule in source_rules:
+                if output_format == _PLAIN and rule.startswith("@@"):
+                    continue
+                if rule in seen_rules:
+                    continue
+                seen_rules.add(rule)
+                rules.append(rule)
+                kept += 1
+            summaries.append(
+                SourceSummary(
+                    name=source.name,
+                    url=source.url,
+                    license=source.license,
+                    project_url=source.project_url,
+                    kept=kept,
+                )
+            )
 
     header = _header(
         output_format,
@@ -107,6 +223,9 @@ def render_allowlist(
         unsupported,
         regexes,
         generator or BLOCKLIST_GENERATOR_HOST,
+        summaries,
+        dropped,
+        user_kept if summaries is not None else None,
     )
     if not rules:
         return header + "\n"
@@ -119,6 +238,7 @@ def sync_published_allowlist(
     enabled: bool,
     generated_at: datetime | None = None,
     generator: str | None = None,
+    sources: Sequence[AllowlistSourceText] | None = None,
 ) -> None:
     """Write both allowlist formats, or remove them when publishing is off."""
     directory = Path(output_dir)
@@ -129,7 +249,7 @@ def sync_published_allowlist(
     moment = generated_at or datetime.now(UTC)
     directory.mkdir(parents=True, exist_ok=True)
     for output_format in ALLOWLIST_FORMATS:
-        text = render_allowlist(whitelist, output_format, moment, generator)
+        text = render_allowlist(whitelist, output_format, moment, generator, sources)
         _write_gzip_atomic(directory / f"{ALLOWLIST_NAME}_{output_format}.txt.gz", text)
     _remove_paths(_hosts_artifacts(directory))
 
@@ -183,12 +303,34 @@ def _header(
     unsupported: list[str],
     regexes: list[str],
     generator: str,
+    sources: list[SourceSummary] | None = None,
+    dropped: int = 0,
+    user_kept: int | None = None,
 ) -> str:
     lines = [
         f"# Allowlist generated by {generator}",
         f"# Generated: {_format_timestamp(generated_at)}",
         f"# Allow rules: {rule_count}",
     ]
+    if sources is not None:
+        lines.append(f"# Dropped unsupported lines: {dropped}")
+        if user_kept is not None:
+            lines.append(f"# User whitelist: {user_kept} entries")
+        for source in sources:
+            lines.append(
+                "# Source: "
+                f"{_header_field(source.name)} | "
+                f"{_header_field(source.license) or 'Unspecified'} | "
+                f"{source.kept} entries | "
+                f"{_header_field(source.url)}"
+            )
+            if source.project_url:
+                lines.append(f"# Maintainer: {_header_field(source.project_url)}")
+            if source.error:
+                lines.append(
+                    "# Source unavailable: "
+                    f"{_header_field(source.name)} | {_header_field(source.url)}"
+                )
     if output_format == _PLAIN:
         lines.append("# Plain format lists exact domains only.")
         lines.append(
@@ -234,6 +376,10 @@ def _format_timestamp(moment: datetime) -> str:
     else:
         moment = moment.astimezone(UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _header_field(value: str) -> str:
+    return " ".join(value.replace("|", "/").replace("\t", " ").split())
 
 
 def _unique(items: list[str]) -> list[str]:

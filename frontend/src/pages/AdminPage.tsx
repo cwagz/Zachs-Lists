@@ -90,6 +90,9 @@ interface LibraryEntry {
   added_by: string;
   created_at: string;
   updated_at: string;
+  list_type?: 'block' | 'allow';
+  license?: string;
+  project_url?: string;
 }
 
 const VALID_TABS: TabType[] = [
@@ -130,7 +133,13 @@ export default function AdminPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [featured, setFeatured] = useState<FeaturedList[]>([]);
-  const emptyDefaultConfig = { config: '', whitelist: '', publish_allowlist: false };
+  const emptyDefaultConfig = {
+    config: '',
+    whitelist: '',
+    publish_allowlist: false,
+    apply_whitelist_to_blocklists: true,
+    allowlist_source_urls: [] as string[],
+  };
   const [savedDefaultConfig, setSavedDefaultConfig] = useState(emptyDefaultConfig);
   const [localConfig, setLocalConfig] = useState(emptyDefaultConfig);
   const [copiedAllowlist, setCopiedAllowlist] = useState(false);
@@ -165,6 +174,9 @@ export default function AdminPage() {
     recommended: false,
     aggressiveness: 3,
     domain_count: 0,
+    list_type: 'block' as 'block' | 'allow',
+    license: '',
+    project_url: '',
   });
   const [editingEntry, setEditingEntry] = useState<LibraryEntry | null>(null);
 
@@ -303,6 +315,8 @@ export default function AdminPage() {
             config: '',
             whitelist: '',
             publish_allowlist: false,
+            apply_whitelist_to_blocklists: true,
+            allowlist_sources: [],
           })),
           adminApi.getAdminAnalytics(30).catch(() => null),
           adminApi.getJobsPerDay(30).catch(() => ({ jobs_per_day: [] })),
@@ -316,6 +330,10 @@ export default function AdminPage() {
           config: configData.config || '',
           whitelist: configData.whitelist || '',
           publish_allowlist: Boolean(configData.publish_allowlist),
+          apply_whitelist_to_blocklists: configData.apply_whitelist_to_blocklists !== false,
+          allowlist_source_urls: Array.isArray(configData.allowlist_sources)
+            ? configData.allowlist_sources.map((source: { url: string }) => source.url)
+            : [],
         };
         setStats(statsData);
         setJobs(jobsData.jobs || []);
@@ -327,7 +345,7 @@ export default function AdminPage() {
         setUserGrowth(userGrowthData?.user_growth || []);
         setLimitRequests(limitRequestsData?.requests || []);
         setPendingRequestCount(limitRequestsData?.pending_count || 0);
-        setLibraryEntries(libraryData?.entries || []);
+        setLibraryEntries(libraryData?.library || libraryData?.entries || []);
         setAnnouncements(announcementsData?.announcements || []);
       } catch (error) {
         console.error('Failed to fetch admin data:', error);
@@ -406,6 +424,8 @@ export default function AdminPage() {
         localConfig.config,
         localConfig.whitelist,
         localConfig.publish_allowlist,
+        localConfig.apply_whitelist_to_blocklists,
+        localConfig.allowlist_source_urls,
       );
       setSavedDefaultConfig(localConfig);
       setMessage({ type: 'success', text: 'Default config saved' });
@@ -485,6 +505,9 @@ export default function AdminPage() {
         recommended: false,
         aggressiveness: 3,
         domain_count: 0,
+        list_type: 'block',
+        license: '',
+        project_url: '',
       });
       setMessage({ type: 'success', text: 'Library entry added' });
     } catch (error: any) {
@@ -506,6 +529,9 @@ export default function AdminPage() {
         recommended: editingEntry.recommended,
         aggressiveness: editingEntry.aggressiveness,
         domain_count: editingEntry.domain_count,
+        list_type: editingEntry.list_type || 'block',
+        license: editingEntry.license || '',
+        project_url: editingEntry.project_url || '',
       });
       setLibraryEntries(libraryEntries.map((e) => (e.id === editingEntry.id ? result.entry : e)));
       setEditingEntry(null);
@@ -1334,6 +1360,60 @@ export default function AdminPage() {
                   </span>
                 </span>
               </label>
+              <label className="mt-4 flex items-start gap-3 text-sm text-pihole-text cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localConfig.apply_whitelist_to_blocklists}
+                  onChange={(e) =>
+                    setLocalConfig({
+                      ...localConfig,
+                      apply_whitelist_to_blocklists: e.target.checked,
+                    })
+                  }
+                  className="mt-1 rounded border-pihole-border bg-pihole-dark text-pihole-accent focus:ring-pihole-accent"
+                />
+                <span>
+                  <span className="font-medium">Apply whitelist to blocklists</span>
+                  <span className="block text-pihole-text-muted mt-1">
+                    On by default. Off publishes deduplicated blocklists and keeps whitelist
+                    entries on the allowlist.
+                  </span>
+                </span>
+              </label>
+              {libraryEntries.some((entry) => entry.list_type === 'allow') && (
+                <div className="mt-4 space-y-2">
+                  <p className="text-sm font-medium text-pihole-text">Allowlist sources</p>
+                  <p className="text-xs text-pihole-text-muted">
+                    None are selected unless you opt the default list in.
+                  </p>
+                  {libraryEntries
+                    .filter((entry) => entry.list_type === 'allow')
+                    .map((entry) => (
+                      <label
+                        key={entry.url}
+                        className="flex items-start gap-2 text-sm text-pihole-text cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={localConfig.allowlist_source_urls.includes(entry.url)}
+                          onChange={(e) => {
+                            const urls = e.target.checked
+                              ? [...localConfig.allowlist_source_urls, entry.url]
+                              : localConfig.allowlist_source_urls.filter((url) => url !== entry.url);
+                            setLocalConfig({ ...localConfig, allowlist_source_urls: urls });
+                          }}
+                          className="mt-1 rounded border-pihole-border bg-pihole-dark"
+                        />
+                        <span>
+                          {entry.name}
+                          <span className="block text-xs text-pihole-text-muted">
+                            {entry.license} · {entry.description}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                </div>
+              )}
               {localConfig.publish_allowlist &&
                 (savedDefaultConfig.publish_allowlist ? (
                   <div className="mt-3 flex items-center gap-2">
@@ -1536,11 +1616,25 @@ export default function AdminPage() {
                 className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
               />
               <select
+                value={newLibraryEntry.list_type}
+                onChange={(e) =>
+                  setNewLibraryEntry({
+                    ...newLibraryEntry,
+                    list_type: e.target.value === 'allow' ? 'allow' : 'block',
+                  })
+                }
+                className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
+              >
+                <option value="block">Blocklist</option>
+                <option value="allow">Allowlist</option>
+              </select>
+              <select
                 value={newLibraryEntry.category}
                 onChange={(e) =>
                   setNewLibraryEntry({ ...newLibraryEntry, category: e.target.value })
                 }
-                className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
+                disabled={newLibraryEntry.list_type === 'allow'}
+                className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent disabled:opacity-50"
               >
                 {LIBRARY_CATEGORIES.map((cat) => (
                   <option key={cat} value={cat}>
@@ -1569,6 +1663,28 @@ export default function AdminPage() {
                 }
                 className="md:col-span-2 bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
               />
+              {newLibraryEntry.list_type === 'allow' && (
+                <>
+                  <input
+                    type="text"
+                    placeholder="License"
+                    value={newLibraryEntry.license}
+                    onChange={(e) =>
+                      setNewLibraryEntry({ ...newLibraryEntry, license: e.target.value })
+                    }
+                    className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
+                  />
+                  <input
+                    type="url"
+                    placeholder="Project URL"
+                    value={newLibraryEntry.project_url}
+                    onChange={(e) =>
+                      setNewLibraryEntry({ ...newLibraryEntry, project_url: e.target.value })
+                    }
+                    className="bg-pihole-darkest border border-pihole-border rounded-lg px-4 py-2 text-sm text-pihole-text focus:outline-none focus:border-pihole-accent"
+                  />
+                </>
+              )}
               <div className="flex items-center gap-6">
                 <label className="flex items-center gap-2 text-sm text-pihole-text cursor-pointer">
                   <input
@@ -1609,9 +1725,38 @@ export default function AdminPage() {
             </div>
           </div>
 
+          {libraryEntries.some((entry) => entry.list_type === 'allow') && (
+            <div className="card">
+              <h3 className="font-semibold text-pihole-text mb-4">
+                Allow
+                <span className="ml-2 text-pihole-text-muted font-normal text-sm">
+                  Public allowlists users can opt into
+                </span>
+              </h3>
+              <div className="space-y-3">
+                {libraryEntries
+                  .filter((entry) => entry.list_type === 'allow')
+                  .map((entry) => (
+                    <div key={entry.id} className="p-4 bg-pihole-darkest rounded-lg">
+                      <div className="font-medium text-pihole-text">{entry.name}</div>
+                      <p className="text-sm text-pihole-text-muted mt-1">{entry.description}</p>
+                      <p className="text-xs text-pihole-text-muted mt-1">
+                        {entry.license || 'Unspecified'} · {entry.url}
+                      </p>
+                      {entry.project_url && (
+                        <p className="text-xs text-pihole-accent mt-1">{entry.project_url}</p>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
           {/* Entries by Category */}
           {LIBRARY_CATEGORIES.map((category) => {
-            const entries = libraryEntries.filter((e) => e.category === category);
+            const entries = libraryEntries.filter(
+              (e) => e.category === category && e.list_type !== 'allow',
+            );
             if (entries.length === 0) return null;
 
             return (

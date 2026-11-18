@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from bson import ObjectId
 
+from app.allowlist_catalog import LIST_TYPE_ALLOW, LIST_TYPE_BLOCK, LIST_TYPES
 from app.extensions import mongo
 
 
@@ -73,6 +74,25 @@ class BlocklistLibrary:
         return self._data.get("added_by", "")
 
     @property
+    def list_type(self) -> str:
+        value = self._data.get("list_type", LIST_TYPE_BLOCK)
+        if value in LIST_TYPES:
+            return value
+        return LIST_TYPE_BLOCK
+
+    @property
+    def license(self) -> str:
+        return self._data.get("license", "") or ""
+
+    @property
+    def project_url(self) -> str:
+        return self._data.get("project_url", "") or ""
+
+    @property
+    def is_allowlist(self) -> bool:
+        return self.list_type == LIST_TYPE_ALLOW
+
+    @property
     def created_at(self) -> datetime:
         return self._data.get("created_at", datetime.utcnow())
 
@@ -92,6 +112,9 @@ class BlocklistLibrary:
             "aggressiveness": self.aggressiveness,
             "domain_count": self.domain_count,
             "added_by": self.added_by,
+            "list_type": self.list_type,
+            "license": self.license,
+            "project_url": self.project_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -136,10 +159,18 @@ class BlocklistLibrary:
         entries = cls.get_all()
         grouped = {}
         for entry in entries:
+            if entry.is_allowlist:
+                continue
             if entry.category not in grouped:
                 grouped[entry.category] = []
             grouped[entry.category].append(entry)
         return grouped
+
+    @classmethod
+    def get_allowlists(cls) -> List["BlocklistLibrary"]:
+        """Allow-type catalog entries, by name."""
+        entries = cls.get_collection().find({"list_type": LIST_TYPE_ALLOW}).sort("name", 1)
+        return [cls(data) for data in entries]
 
     @classmethod
     def create(
@@ -152,6 +183,10 @@ class BlocklistLibrary:
         aggressiveness: int = 3,
         domain_count: int = 0,
         added_by: str = "",
+        list_type: str = LIST_TYPE_BLOCK,
+        license: str = "",
+        project_url: str = "",
+        seed_key: str = "",
     ) -> "BlocklistLibrary":
         """Create a new library entry."""
         now = datetime.utcnow()
@@ -166,6 +201,10 @@ class BlocklistLibrary:
             ),
             "domain_count": domain_count,
             "added_by": added_by,
+            "list_type": list_type if list_type in LIST_TYPES else LIST_TYPE_BLOCK,
+            "license": license,
+            "project_url": project_url,
+            "seed_key": seed_key,
             "created_at": now,
             "updated_at": now,
         }
@@ -182,6 +221,9 @@ class BlocklistLibrary:
         recommended: Optional[bool] = None,
         aggressiveness: Optional[int] = None,
         domain_count: Optional[int] = None,
+        list_type: Optional[str] = None,
+        license: Optional[str] = None,
+        project_url: Optional[str] = None,
     ) -> bool:
         """Update library entry."""
         update_data = {"updated_at": datetime.utcnow()}
@@ -202,6 +244,12 @@ class BlocklistLibrary:
             )
         if domain_count is not None:
             update_data["domain_count"] = domain_count
+        if list_type is not None and list_type in LIST_TYPES:
+            update_data["list_type"] = list_type
+        if license is not None:
+            update_data["license"] = license
+        if project_url is not None:
+            update_data["project_url"] = project_url
 
         result = self.get_collection().update_one(
             {"_id": self._id}, {"$set": update_data}
