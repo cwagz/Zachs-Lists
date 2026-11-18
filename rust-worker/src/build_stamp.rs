@@ -32,6 +32,81 @@ pub fn generator_host_matches(stored_generator_host: Option<&str>, generator_hos
     stored_generator_host == Some(generator_host)
 }
 
+/// One opted-in allowlist source, without its downloaded body.
+///
+/// The hash string must stay identical to `config_hash_material` in
+/// `backend/app/allowlist_selection.py`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowlistIdentity {
+    pub url: String,
+    pub name: String,
+    pub license: String,
+    pub project_url: String,
+}
+
+/// Identity of a build for the no-changes skip.
+///
+/// No selected allowlists and whitelist filtering left on reproduce the
+/// historical blocklist hash, so unchanged users still skip.
+pub fn config_hash_material(
+    blocklists: &str,
+    whitelist: &str,
+    sources: &[AllowlistIdentity],
+    apply_whitelist: bool,
+    publish_allowlist: bool,
+) -> String {
+    let base = format!("{blocklists}\n---SEPARATOR---\n{whitelist}");
+    let canonical = canonical_source_lines(sources);
+    if canonical.is_empty() && apply_whitelist {
+        return base;
+    }
+    let mut lines = vec![base, "---ALLOWLIST-SOURCES---".to_string()];
+    lines.extend(canonical.iter().cloned());
+    lines.push("---APPLY-WHITELIST---".to_string());
+    lines.push(if apply_whitelist { "1" } else { "0" }.to_string());
+    if !canonical.is_empty() {
+        lines.push("---PUBLISH-ALLOWLIST---".to_string());
+        lines.push(if publish_allowlist { "1" } else { "0" }.to_string());
+    }
+    lines.join("\n")
+}
+
+/// Missing values keep whitelist filtering on.
+pub fn should_apply_whitelist(stored: Option<bool>) -> bool {
+    stored.unwrap_or(true)
+}
+
+fn canonical_source_lines(sources: &[AllowlistIdentity]) -> Vec<String> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for source in sources {
+        let url = flat(&source.url);
+        if url.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
+        rows.push((
+            url.clone(),
+            [
+                url,
+                flat(&source.name),
+                flat(&source.license),
+                flat(&source.project_url),
+            ]
+            .join("\t"),
+        ));
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows.into_iter().map(|(_, line)| line).collect()
+}
+
+fn flat(value: &str) -> String {
+    value
+        .replace('\t', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Skip a non-scheduled, non-forced job only when the last build's config
 /// hash and list-file hostname both match and every source is cached.
 pub fn should_skip_unchanged_build(
@@ -161,6 +236,75 @@ mod tests {
         assert!(!generator_host_matches(None, fallback));
         assert!(!stored.matches("hash-aaa", fallback));
         assert!(stamp(Some("hash-aaa"), Some(fallback)).matches("hash-aaa", fallback));
+    }
+
+    #[test]
+    fn toggle_and_allowlist_sources_change_the_skip_hash() {
+        let historical = config_hash_material("block", "white", &[], true, false);
+        assert_eq!(historical, "block\n---SEPARATOR---\nwhite");
+        assert_eq!(
+            config_hash_material("block", "white", &[], true, true),
+            historical
+        );
+        assert!(should_apply_whitelist(None));
+        assert!(should_apply_whitelist(Some(true)));
+        assert!(!should_apply_whitelist(Some(false)));
+
+        let toggled = config_hash_material("block", "white", &[], false, false);
+        assert_ne!(toggled, historical);
+        assert!(toggled.ends_with("---APPLY-WHITELIST---\n0"));
+        let stored = stamp(Some(&historical), Some("lists.example.test"));
+        assert!(!should_skip_unchanged_build(
+            false,
+            false,
+            true,
+            &stored,
+            &toggled,
+            "lists.example.test",
+        ));
+        assert!(should_skip_unchanged_build(
+            false,
+            false,
+            true,
+            &stored,
+            &historical,
+            "lists.example.test",
+        ));
+
+        let sources = vec![
+            AllowlistIdentity {
+                url: "https://lists.example.test/b.txt".to_string(),
+                name: "B".to_string(),
+                license: "MIT".to_string(),
+                project_url: "https://example.test/b".to_string(),
+            },
+            AllowlistIdentity {
+                url: "https://lists.example.test/a.txt".to_string(),
+                name: "A".to_string(),
+                license: "GPL-3.0".to_string(),
+                project_url: "https://example.test/a".to_string(),
+            },
+        ];
+        let with_sources = config_hash_material("block", "white", &sources, true, false);
+        let mut reversed = sources.clone();
+        reversed.reverse();
+        assert_eq!(
+            with_sources,
+            config_hash_material("block", "white", &reversed, true, false)
+        );
+        assert!(with_sources
+            .contains("https://lists.example.test/a.txt\tA\tGPL-3.0\thttps://example.test/a"));
+        let published = config_hash_material("block", "white", &sources, true, true);
+        assert_ne!(published, with_sources);
+        assert!(published.ends_with("---PUBLISH-ALLOWLIST---\n1"));
+        assert!(!should_skip_unchanged_build(
+            false,
+            false,
+            true,
+            &stored,
+            &with_sources,
+            "lists.example.test",
+        ));
     }
 
     #[test]

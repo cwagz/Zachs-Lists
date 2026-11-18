@@ -38,6 +38,8 @@ class SystemConfig:
                 "blocklists": doc.get("blocklists", ""),
                 "whitelist": doc.get("whitelist", ""),
                 "publish_allowlist": doc.get("publish_allowlist") is True,
+                "apply_whitelist_to_blocklists": _apply_whitelist(doc),
+                "allowlist_sources": _allowlist_sources(doc),
                 "updated_at": doc.get("updated_at"),
                 "updated_by": doc.get("updated_by"),
             }
@@ -45,6 +47,8 @@ class SystemConfig:
             "blocklists": "",
             "whitelist": "",
             "publish_allowlist": False,
+            "apply_whitelist_to_blocklists": True,
+            "allowlist_sources": [],
             "updated_at": None,
             "updated_by": None,
         }
@@ -58,6 +62,60 @@ class SystemConfig:
         if not doc:
             return False
         return doc.get("publish_allowlist") is True
+
+    @classmethod
+    def apply_whitelist_to_blocklists(cls) -> bool:
+        """Default-list whitelist filtering. Missing values stay on."""
+        doc = mongo.db[cls.COLLECTION].find_one(
+            {"_id": cls.DOC_ID}, {"apply_whitelist_to_blocklists": 1}
+        )
+        if not doc:
+            return True
+        return _apply_whitelist(doc)
+
+    @classmethod
+    def allowlist_sources(cls) -> list:
+        """Allowlist sources selected for the default list. Default is none."""
+        doc = mongo.db[cls.COLLECTION].find_one(
+            {"_id": cls.DOC_ID}, {"allowlist_sources": 1}
+        )
+        if not doc:
+            return []
+        return _allowlist_sources(doc)
+
+    @classmethod
+    def set_apply_whitelist_to_blocklists(cls, enabled: bool, updated_by: str) -> None:
+        """Set whether the default blocklists are whitelist-filtered."""
+        mongo.db[cls.COLLECTION].update_one(
+            {"_id": cls.DOC_ID},
+            {
+                "$set": {
+                    "apply_whitelist_to_blocklists": enabled,
+                    "updated_at": datetime.utcnow(),
+                    "updated_by": updated_by,
+                },
+                "$setOnInsert": {"blocklists": "", "whitelist": ""},
+            },
+            upsert=True,
+        )
+
+    @classmethod
+    def set_allowlist_sources(cls, sources: list, updated_by: str) -> None:
+        """Store the default list's opted-in allowlist sources."""
+        from app.allowlist_selection import normalize_allowlist_sources
+
+        mongo.db[cls.COLLECTION].update_one(
+            {"_id": cls.DOC_ID},
+            {
+                "$set": {
+                    "allowlist_sources": normalize_allowlist_sources(sources),
+                    "updated_at": datetime.utcnow(),
+                    "updated_by": updated_by,
+                },
+                "$setOnInsert": {"blocklists": "", "whitelist": ""},
+            },
+            upsert=True,
+        )
 
     @classmethod
     def set_publish_allowlist(cls, enabled: bool, updated_by: str) -> None:
@@ -128,3 +186,15 @@ class SystemConfig:
             update,
             upsert=True,
         )
+
+
+def _apply_whitelist(doc: dict) -> bool:
+    from app.allowlist_selection import apply_whitelist_enabled
+
+    return apply_whitelist_enabled(doc.get("apply_whitelist_to_blocklists"))
+
+
+def _allowlist_sources(doc: dict) -> list:
+    from app.allowlist_selection import normalize_allowlist_sources
+
+    return normalize_allowlist_sources(doc.get("allowlist_sources"))

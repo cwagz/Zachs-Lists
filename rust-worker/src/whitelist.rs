@@ -324,6 +324,22 @@ impl WhitelistManager {
         (removed, pattern_matches)
     }
 
+    /// Apply whitelist filtering only when the user left the toggle on.
+    ///
+    /// Off keeps every domain. Blocklists are still deduplicated by the sets
+    /// that feed this function; the whitelist is published on the allowlist
+    /// instead.
+    pub fn filter_if_enabled(
+        &self,
+        domains: HashSet<String>,
+        apply: bool,
+    ) -> (HashSet<String>, u64, Vec<WhitelistPatternMatch>) {
+        if !apply {
+            return (domains, 0, Vec::new());
+        }
+        self.filter_domains(domains)
+    }
+
     /// Create progress report for whitelist stage
     pub fn create_progress(
         &self,
@@ -370,6 +386,24 @@ impl Default for WhitelistManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_off_keeps_domains_that_the_whitelist_would_remove() {
+        let manager = WhitelistManager::from_content("ads.example.com\n@@other.example");
+        let domains: HashSet<String> = ["ads.example.com", "keep.example", "sub.other.example"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let (kept_off, removed_off, _) = manager.filter_if_enabled(domains.clone(), false);
+        assert_eq!(removed_off, 0);
+        assert_eq!(kept_off.len(), 3);
+
+        let (kept_on, removed_on, _) = manager.filter_if_enabled(domains, true);
+        assert_eq!(removed_on, 2);
+        assert!(!kept_on.iter().any(|domain| domain == "ads.example.com"));
+        assert!(kept_on.iter().any(|domain| domain == "keep.example"));
+    }
 
     #[test]
     fn test_exact_pattern() {

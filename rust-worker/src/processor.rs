@@ -9,7 +9,10 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::build_stamp::{generator_host_matches, should_skip_unchanged_build};
+use crate::allowlist_render::AllowSourceBody;
+use crate::build_stamp::{
+    config_hash_material, generator_host_matches, should_skip_unchanged_build,
+};
 use crate::config::Config;
 use crate::db::job::{Job, JobRepository, JobType};
 use crate::db::progress::{
@@ -17,7 +20,7 @@ use crate::db::progress::{
     SourceStatus, StageSnapshot,
 };
 use crate::db::user::{ListMetadata, MatchedUser, UserRepository};
-use crate::db::user_config::UserConfigRepository;
+use crate::db::user_config::{BuildInputs, UserConfigRepository};
 use crate::downloader::{DownloadResult, Downloader, Source};
 use crate::extractor::DomainExtractor;
 use crate::generator::OutputGenerator;
@@ -97,21 +100,28 @@ impl JobProcessor {
         })
     }
 
-    /// Compute config hash (SHA256 of blocklists + whitelist)
-    fn compute_config_hash(blocklists: &str, whitelist: &str) -> String {
-        let combined = format!("{}\n---SEPARATOR---\n{}", blocklists, whitelist);
+    /// Compute config hash (SHA256 of blocklists, whitelist, and allowlist identity)
+    fn compute_config_hash(inputs: &BuildInputs) -> String {
+        let material = config_hash_material(
+            &inputs.blocklists,
+            &inputs.whitelist,
+            &inputs.allowlist_identities(),
+            inputs.apply_whitelist_to_blocklists,
+            inputs.publish_allowlist,
+        );
         let mut hasher = Sha256::new();
-        hasher.update(combined.as_bytes());
+        hasher.update(material.as_bytes());
         format!("{:x}", hasher.finalize())
     }
 
-    /// Compute normalized config fingerprint for cross-user matching
+    /// Compute normalized config fingerprint for cross-user matching.
     ///
-    /// Creates a fingerprint from sorted, normalized sources and whitelist patterns.
-    /// Two configs with same sources and whitelist (regardless of comments/order) → same fingerprint.
-    fn compute_config_fingerprint(blocklists: &str, whitelist: &str) -> Result<String> {
+    /// Allowlist selection and the whitelist toggle are part of the fingerprint
+    /// because they change either the blocklists or the allowlist a copy would
+    /// otherwise reuse.
+    fn compute_config_fingerprint(inputs: &BuildInputs) -> Result<String> {
         // Parse and sort sources by URL
-        let mut sources = Downloader::parse_config(blocklists)?;
+        let mut sources = Downloader::parse_config(&inputs.blocklists)?;
         sources.sort_by(|a, b| a.url.cmp(&b.url));
 
         // Create normalized string representation of sources
@@ -128,11 +138,36 @@ impl JobProcessor {
             .collect();
 
         // Parse and sort whitelist patterns
-        let whitelist_mgr = WhitelistManager::from_content(whitelist);
+        let whitelist_mgr = WhitelistManager::from_content(&inputs.whitelist);
         let patterns = whitelist_mgr.patterns_as_strings();
+        let mut allow_lines: Vec<String> = inputs
+            .allowlist_identities()
+            .iter()
+            .map(|source| {
+                format!(
+                    "{}|{}|{}|{}",
+                    source.url.to_lowercase().trim_end_matches('/'),
+                    source.name.to_lowercase(),
+                    source.license.to_lowercase(),
+                    source.project_url.to_lowercase()
+                )
+            })
+            .collect();
+        allow_lines.sort();
+        let apply = if inputs.apply_whitelist_to_blocklists {
+            "1"
+        } else {
+            "0"
+        };
 
         // Hash combined normalized content
-        let combined = format!("{}\n---\n{}", sources_str.join("\n"), patterns.join("\n"));
+        let combined = format!(
+            "{}\n---\n{}\n---\napply={}\n---\n{}",
+            sources_str.join("\n"),
+            patterns.join("\n"),
+            apply,
+            allow_lines.join("\n")
+        );
         let mut hasher = Sha256::new();
         hasher.update(combined.as_bytes());
         Ok(format!("{:x}", hasher.finalize()))
@@ -240,8 +275,8 @@ impl JobProcessor {
         }
 
         // Load config from MongoDB
-        let config_content = match self.user_config_repo.get_blocklists(&job.username).await {
-            Ok(content) => content,
+        let inputs = match self.user_config_repo.get_build_inputs(&job.username).await {
+            Ok(inputs) => inputs,
             Err(e) => {
                 self.job_repo
                     .fail(&job.id, vec![format!("Failed to load config: {}", e)])
@@ -250,18 +285,14 @@ impl JobProcessor {
             }
         };
 
-        // Load whitelist content early for config hash calculation
-        let whitelist_content = self.user_config_repo.get_whitelist(&job.username).await
-            .unwrap_or_default();
-
         // Compute current config hash
-        let current_config_hash = Self::compute_config_hash(&config_content, &whitelist_content);
+        let current_config_hash = Self::compute_config_hash(&inputs);
 
         // Compute normalized fingerprint for cross-user matching
-        let config_fingerprint = Self::compute_config_fingerprint(&config_content, &whitelist_content)?;
+        let config_fingerprint = Self::compute_config_fingerprint(&inputs)?;
 
         // Parse sources
-        let sources = Downloader::parse_config(&config_content)?;
+        let sources = Downloader::parse_config(&inputs.blocklists)?;
         if sources.is_empty() {
             self.job_repo
                 .fail(&job.id, vec!["No valid sources in config".to_string()])
@@ -285,7 +316,9 @@ impl JobProcessor {
             // itself is `should_skip_unchanged_build`.
             let all_cached = if stored_stamp.matches(&current_config_hash, &self.config.generator_host)
             {
-                self.downloader.check_all_cached(&sources).await
+                let mut cache_sources = sources.clone();
+                cache_sources.extend(allowlist_cache_sources(&inputs));
+                self.downloader.check_all_cached(&cache_sources).await
             } else {
                 false
             };
@@ -481,6 +514,16 @@ impl JobProcessor {
                         );
                     }
 
+                    if let Err(error) = self
+                        .publish_allowlist(&job.username, &inputs, job.force_rebuild)
+                        .await
+                    {
+                        warn!(
+                            "Failed to publish allowlist for {} after copy: {}",
+                            job.username, error
+                        );
+                    }
+
                     let duration = start_time.elapsed();
                     info!(
                         "Job {} completed in {:.2}s (copied from {}) - {} domains",
@@ -575,7 +618,13 @@ impl JobProcessor {
 
         // Stage 3: Whitelist filtering
         let (filtered_domains, whitelist_removed, _whitelist_progress) = self
-            .whitelist_stage(&job.id, &job.username, category_domains, Arc::clone(&progress))
+            .whitelist_stage(
+                &job.id,
+                &job.username,
+                category_domains,
+                Arc::clone(&progress),
+                inputs.apply_whitelist_to_blocklists,
+            )
             .await?;
 
         info!(
@@ -615,6 +664,16 @@ impl JobProcessor {
             whitelist_removed,
             output_files.clone(),
         );
+
+        if let Err(error) = self
+            .publish_allowlist(&job.username, &inputs, job.force_rebuild)
+            .await
+        {
+            warn!(
+                "Failed to publish allowlist for {}: {}",
+                job.username, error
+            );
+        }
 
         // Mark job as completed
         self.job_repo.complete(&job.id, result).await?;
@@ -862,12 +921,71 @@ impl JobProcessor {
     }
 
     /// Whitelist stage: filter out whitelisted domains from all categories
+    async fn publish_allowlist(
+        &self,
+        username: &str,
+        inputs: &BuildInputs,
+        force: bool,
+    ) -> Result<()> {
+        let output_dir = self.config.output_dir(username);
+        if !inputs.publish_allowlist {
+            crate::allowlist_render::remove_published_allowlist(&output_dir)?;
+            return Ok(());
+        }
+        let mut bodies = Vec::with_capacity(inputs.allowlist_sources.len());
+        for source in &inputs.allowlist_sources {
+            let name = if source.name.trim().is_empty() {
+                "allowlist".to_string()
+            } else {
+                source.name.clone()
+            };
+            let download = self
+                .downloader
+                .download_source(
+                    &Source {
+                        name,
+                        url: source.url.clone(),
+                        category: None,
+                    },
+                    force,
+                )
+                .await;
+            let (text, error) = match download.content {
+                Some(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), None),
+                None => (
+                    String::new(),
+                    Some(
+                        download
+                            .error
+                            .unwrap_or_else(|| "download failed".to_string()),
+                    ),
+                ),
+            };
+            bodies.push(AllowSourceBody {
+                name: source.name.clone(),
+                url: source.url.clone(),
+                license: source.license.clone(),
+                project_url: source.project_url.clone(),
+                text,
+                error,
+            });
+        }
+        crate::allowlist_render::write_published_allowlist(
+            &output_dir,
+            &inputs.whitelist,
+            &bodies,
+            Utc::now(),
+            &self.config.generator_host,
+        )
+    }
+
     async fn whitelist_stage(
         &self,
         job_id: &bson::oid::ObjectId,
         username: &str,
         category_domains: CategoryDomains,
         progress: Arc<Mutex<JobProgress>>,
+        apply_whitelist: bool,
     ) -> Result<(CategoryDomains, u64, crate::db::progress::WhitelistProgress)> {
         // Borrow every unique domain for global stats, without cloning them
         let unique_domains: Vec<&String> = category_domains
@@ -905,13 +1023,18 @@ impl JobProcessor {
         let whitelist = WhitelistManager::from_content(&whitelist_content);
 
         // Whitelist stats over ALL domains (pattern matches, etc.)
-        let (total_removed, pattern_matches) = whitelist.filter_stats(&unique_domains);
+        let (total_removed, pattern_matches) = if apply_whitelist {
+            whitelist.filter_stats(&unique_domains)
+        } else {
+            (0, Vec::new())
+        };
         drop(unique_domains);
 
-        // Filter each category separately
+        // Filter each category separately. The toggle off leaves the deduped
+        // domains in place so Pi-hole can resolve them against the allowlist.
         let mut filtered = CategoryDomains::new();
         for (category, domains) in category_domains.by_category {
-            let (remaining, _, _) = whitelist.filter_domains(domains);
+            let (remaining, _, _) = whitelist.filter_if_enabled(domains, apply_whitelist);
             if !remaining.is_empty() {
                 filtered.by_category.insert(category, remaining);
             }
@@ -1049,4 +1172,21 @@ impl JobProcessor {
         self.job_repo.update_progress(job_id, &*p).await?;
         Ok(())
     }
+}
+
+fn allowlist_cache_sources(inputs: &BuildInputs) -> Vec<Source> {
+    inputs
+        .allowlist_sources
+        .iter()
+        .filter(|source| !source.url.trim().is_empty())
+        .map(|source| Source {
+            name: if source.name.trim().is_empty() {
+                "allowlist".to_string()
+            } else {
+                source.name.clone()
+            },
+            url: source.url.clone(),
+            category: None,
+        })
+        .collect()
 }

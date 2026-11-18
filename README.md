@@ -97,6 +97,10 @@ https://lists.zachlagden.uk/u/yourname/allowlist.txt
 - `*.example.com` (subdomains only) becomes `@@||example.com^`, which also allows the apex
 - `/regex/` is not emitted. Add it locally with `pihole --allow-regex`
 
+The Config page also lists public allowlist sources next to blocklist selection. None are selected until you opt in. A build merges the ones you select with your whitelist, keeps exact domains and `@@||domain^`, and drops other lines. The allowlist header names each source, its license, how many entries it contributed, and how many lines were dropped.
+
+**Apply whitelist to blocklists** stays on, which is the existing behavior: whitelist patterns are removed from blocklists. Turn it off to publish deduplicated blocklists and send those whitelist entries only to the allowlist, so Pi-hole resolves block versus allow. Publish the allowlist when you turn it off, or the whitelist will not apply anywhere. Changing the toggle or the selected sources rebuilds on the next manual run.
+
 ---
 
 ## How It Works
@@ -112,7 +116,7 @@ https://lists.zachlagden.uk/u/yourname/allowlist.txt
 
 **2. Download** — The Rust worker fetches all sources in parallel (10 concurrent downloads). Smart caching means unchanged sources aren't re-downloaded.
 
-**3. Whitelist** — Your whitelist patterns filter out false positives. Support for exact matches, `*.wildcard.com`, `@@example.com` (apex and subdomains), and `/regex/` patterns. You can opt in to publish that whitelist as a Pi-hole v6 allowlist.
+**3. Whitelist** — Your whitelist patterns filter out false positives. Support for exact matches, `*.wildcard.com`, `@@example.com` (apex and subdomains), and `/regex/` patterns. You can opt in to publish that whitelist as a Pi-hole v6 allowlist, and opt into public allowlist sources that are merged on the next build. Leave **Apply whitelist to blocklists** on to keep removing those domains from blocklists.
 
 **4. Generate** — Deduplicated domains are output in three formats: hosts file (Pi-hole native), plain text, and Adblock syntax.
 

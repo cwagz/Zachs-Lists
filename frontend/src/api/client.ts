@@ -79,11 +79,21 @@ export const userApi = {
     return response.data;
   },
 
-  updateWhitelist: async (whitelist: string, publishAllowlist: boolean) => {
+  updateWhitelist: async (
+    whitelist: string,
+    publishAllowlist: boolean,
+    applyWhitelistToBlocklists = true,
+  ) => {
     const response = await api.put('/api/user/whitelist', {
       whitelist,
       publish_allowlist: publishAllowlist,
+      apply_whitelist_to_blocklists: applyWhitelistToBlocklists,
     });
+    return response.data;
+  },
+
+  updateAllowlistSources: async (urls: string[]) => {
+    const response = await api.put('/api/user/allowlist-sources', { urls });
     return response.data;
   },
 
@@ -286,11 +296,19 @@ export const adminApi = {
     return response.data;
   },
 
-  updateDefaultConfig: async (config?: string, whitelist?: string, publishAllowlist?: boolean) => {
+  updateDefaultConfig: async (
+    config?: string,
+    whitelist?: string,
+    publishAllowlist?: boolean,
+    applyWhitelistToBlocklists = true,
+    allowlistSourceUrls: string[] = [],
+  ) => {
     const response = await api.put('/api/admin/default/config', {
       config,
       whitelist,
       publish_allowlist: publishAllowlist,
+      apply_whitelist_to_blocklists: applyWhitelistToBlocklists,
+      allowlist_source_urls: allowlistSourceUrls,
     });
     return response.data;
   },
@@ -383,6 +401,9 @@ export const adminApi = {
     recommended?: boolean;
     aggressiveness?: number;
     domain_count?: number;
+    list_type?: 'block' | 'allow';
+    license?: string;
+    project_url?: string;
   }) => {
     const response = await api.post('/api/admin/library', data);
     return response.data;
@@ -398,6 +419,9 @@ export const adminApi = {
       recommended?: boolean;
       aggressiveness?: number;
       domain_count?: number;
+      list_type?: 'block' | 'allow';
+      license?: string;
+      project_url?: string;
     },
   ) => {
     const response = await api.put(`/api/admin/library/${entryId}`, data);

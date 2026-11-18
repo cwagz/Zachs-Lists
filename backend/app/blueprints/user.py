@@ -24,7 +24,9 @@ from app.socketio import emit_validation_progress, emit_validation_complete
 from app.models.blocklist_library import BlocklistLibrary
 from app.models.cache import CacheMetadata
 from app.allowlist import is_blocklist_catalog_name
+from app.allowlist_selection import resolve_allowlist_selection
 from app.services.allowlist_publish import sync_user_allowlist
+from app.services.allowlist_seed import ensure_allowlist_catalog
 from app.utils.config_revision import ConfigRevisionConflict
 
 user_bp = Blueprint("user", __name__)
@@ -256,6 +258,7 @@ def get_url_metadata(user: User):
 @login_required
 def get_library(user: User):
     """Get blocklist library grouped by category for visual editor."""
+    ensure_allowlist_catalog()
     grouped = BlocklistLibrary.get_grouped_by_category()
 
     return jsonify(
@@ -264,6 +267,7 @@ def get_library(user: User):
                 category: [entry.to_dict() for entry in entries]
                 for category, entries in grouped.items()
             },
+            "allowlists": [entry.to_dict() for entry in BlocklistLibrary.get_allowlists()],
             "categories": sorted(VALID_CATEGORIES),
         }
     )
@@ -278,6 +282,8 @@ def get_whitelist(user: User):
         {
             "whitelist": whitelist or "",
             "publish_allowlist": user.publish_allowlist,
+            "apply_whitelist_to_blocklists": user.apply_whitelist_to_blocklists,
+            "allowlist_sources": user.allowlist_sources,
         }
     )
 
@@ -287,12 +293,22 @@ def get_whitelist(user: User):
 def update_whitelist(user: User):
     """Update whitelist and, optionally, allowlist publication."""
     data = request.get_json(silent=True) or {}
-    if "whitelist" not in data and "publish_allowlist" not in data:
+    if (
+        "whitelist" not in data
+        and "publish_allowlist" not in data
+        and "apply_whitelist_to_blocklists" not in data
+    ):
         return jsonify({"error": "No whitelist changes"}), 400
 
     publish_allowlist = data.get("publish_allowlist", user.publish_allowlist)
     if not isinstance(publish_allowlist, bool):
         return jsonify({"error": "publish_allowlist must be a boolean"}), 400
+
+    apply_whitelist = data.get(
+        "apply_whitelist_to_blocklists", user.apply_whitelist_to_blocklists
+    )
+    if not isinstance(apply_whitelist, bool):
+        return jsonify({"error": "apply_whitelist_to_blocklists must be a boolean"}), 400
 
     if "whitelist" in data:
         whitelist = data.get("whitelist", "")
@@ -323,8 +339,52 @@ def update_whitelist(user: User):
             f"User {user.username} set publish_allowlist={publish_allowlist}"
         )
 
+    if apply_whitelist != user.apply_whitelist_to_blocklists:
+        user.set_apply_whitelist_to_blocklists(apply_whitelist)
+        current_app.logger.info(
+            f"User {user.username} set apply_whitelist_to_blocklists={apply_whitelist}"
+        )
+
     sync_user_allowlist(user)
-    return jsonify({"success": True, "publish_allowlist": user.publish_allowlist})
+    return jsonify(
+        {
+            "success": True,
+            "publish_allowlist": user.publish_allowlist,
+            "apply_whitelist_to_blocklists": user.apply_whitelist_to_blocklists,
+        }
+    )
+
+
+@user_bp.route("/allowlist-sources", methods=["PUT"])
+@login_required
+def update_allowlist_sources(user: User):
+    """Opt into public allowlist catalog entries. An empty list selects none."""
+    data = request.get_json(silent=True) or {}
+    if "urls" not in data:
+        return jsonify({"error": "No allowlist sources"}), 400
+
+    ensure_allowlist_catalog()
+    catalog = [
+        {
+            "url": entry.url,
+            "name": entry.name,
+            "license": entry.license,
+            "project_url": entry.project_url,
+        }
+        for entry in BlocklistLibrary.get_allowlists()
+    ]
+    selected, error = resolve_allowlist_selection(
+        data.get("urls"), catalog, user.limits["max_source_lists"]
+    )
+    if error:
+        return jsonify({"error": error}), 400
+
+    user.set_allowlist_sources(selected)
+    sync_user_allowlist(user)
+    current_app.logger.info(
+        f"User {user.username} selected {len(selected)} allowlist sources"
+    )
+    return jsonify({"success": True, "allowlist_sources": user.allowlist_sources})
 
 
 @user_bp.route("/lists", methods=["GET"])

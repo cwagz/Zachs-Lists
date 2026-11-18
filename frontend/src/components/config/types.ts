@@ -11,6 +11,9 @@ export interface LibraryEntry {
   added_by: string;
   created_at: string;
   updated_at: string;
+  list_type?: 'block' | 'allow';
+  license?: string;
+  project_url?: string;
 }
 
 // Parsed config line
