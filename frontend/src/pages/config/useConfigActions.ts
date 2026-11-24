@@ -136,6 +136,7 @@ export function useConfigActions(
       revision: server.revision,
     });
     client.setQueryData<WhitelistResponse>(configKeys.whitelist(), (current) => ({
+      ...current,
       whitelist: server.whitelist,
       publish_allowlist: current?.publish_allowlist ?? false,
     }));

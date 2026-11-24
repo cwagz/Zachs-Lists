@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { describeDownloads, describeList, isPublicList } from './listsFacts';
+import {
+  describeDownloads,
+  describeList,
+  isPublicList,
+  publishedListAddress,
+  unavailableFormatMessage,
+} from './listsFacts';
 
 const NOW = new Date('2026-11-15T12:00:00.000Z');
 
@@ -32,6 +38,22 @@ describe('list visibility', () => {
     expect(isPublicList({})).toBe(true);
     expect(isPublicList({ is_public: true })).toBe(true);
     expect(isPublicList({ is_public: false })).toBe(false);
+  });
+});
+
+describe('published addresses', () => {
+  it('uses one allowlist address for the selected format', () => {
+    expect(publishedListAddress('https://lists.example', 'sam', 'allowlist', ['adblock', 'plain'], 'adblock')).toBe(
+      'https://lists.example/u/sam/allowlist.txt',
+    );
+    expect(publishedListAddress('https://lists.example', 'sam', 'allowlist', ['adblock', 'plain'], 'plain')).toBe(
+      'https://lists.example/u/sam/allowlist.txt?format=plain',
+    );
+    expect(publishedListAddress('https://lists.example', 'sam', 'allowlist', ['adblock', 'plain'], 'hosts')).toBeNull();
+    expect(unavailableFormatMessage('allowlist', 'hosts')).toMatch(/Hosts format is not available/);
+    expect(publishedListAddress('https://lists.example', 'sam', 'all_domains', ['hosts', 'plain', 'adblock'], 'hosts')).toBe(
+      'https://lists.example/u/sam/all_domains.txt?format=hosts',
+    );
   });
 });
 

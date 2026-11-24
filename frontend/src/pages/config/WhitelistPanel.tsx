@@ -1,4 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState, type FormEvent } from 'react';
+import { whitelistQuery } from '../../api/config';
+import { SegmentedControl } from '../../components/ui/SegmentedControl';
 import {
   WHITELIST_KINDS,
   describeWhitelistMatch,
@@ -13,6 +16,7 @@ import { Field, Input } from '../../components/ui/Field';
 import { EmptyState } from '../../components/ui/States';
 import { StatusPill } from '../../components/ui/StatusPill';
 import { pluralise } from '../../lib/format';
+import { cannedKeys, isCannedEntry } from './whitelistGroups';
 
 export interface WhitelistPanelProps {
   entries: WhitelistEntry[];
@@ -85,6 +89,8 @@ function AddEntryForm({
   );
 }
 
+type LineGroup = 'default' | 'yours';
+
 export function WhitelistPanel({
   entries,
   commentCount,
@@ -92,13 +98,52 @@ export function WhitelistPanel({
   onAdd,
   onRemove,
 }: WhitelistPanelProps) {
-  const groups = groupWhitelist(entries);
+  const defaults = useQuery(whitelistQuery());
+  const keys = useMemo(
+    () => cannedKeys(defaults.data?.default_whitelist ?? ''),
+    [defaults.data?.default_whitelist],
+  );
+  const [group, setGroup] = useState<LineGroup>('yours');
+  const [filter, setFilter] = useState('');
+  const visible = entries.filter((entry) => isCannedEntry(entry, keys) === (group === 'default'));
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? visible.filter((entry) => entry.pattern.toLowerCase().includes(needle))
+    : visible;
+  const groups = groupWhitelist(shown);
+  const cannedCount = entries.filter((entry) => isCannedEntry(entry, keys)).length;
   return (
     <div className="[&>section:last-child_li:last-child]:border-b-0">
-      <AddEntryForm entries={entries} onAdd={onAdd} />
-      {entries.length === 0 ? (
-        <EmptyState title="Nothing is whitelisted">
-          Every domain in your sources is blocked. Add a domain here to keep it out of your lists.
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-[18px] py-3 narrow:px-3">
+        <SegmentedControl
+          label="Whitelist lines"
+          value={group}
+          onChange={setGroup}
+          options={[
+            { value: 'default', label: `Default (${cannedCount})` },
+            { value: 'yours', label: `Yours (${entries.length - cannedCount})` },
+          ]}
+        />
+      </div>
+      {group === 'yours' ? <AddEntryForm entries={entries} onAdd={onAdd} /> : null}
+      {visible.length > 8 ? (
+        <div className="border-b border-border px-[18px] py-3 narrow:px-3">
+          <Field label="Filter lines">
+            <Input
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="example.com"
+            />
+          </Field>
+        </div>
+      ) : null}
+      {shown.length === 0 ? (
+        <EmptyState title={needle ? 'Nothing matches that filter' : group === 'default' ? 'No default whitelist lines' : 'No lines of your own'}>
+          {needle
+            ? 'Try a shorter piece of the domain.'
+            : group === 'default'
+              ? 'Lines that match the current default whitelist show up here. Use the default template to copy them.'
+              : 'Add a domain or pattern here. It is kept with the default lines and any allowlists you subscribe to.'}
         </EmptyState>
       ) : (
         WHITELIST_KINDS.filter((kind) => groups[kind].length > 0).map((kind) => {

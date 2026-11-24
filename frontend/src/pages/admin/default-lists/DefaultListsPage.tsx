@@ -1,21 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import {
-  adminKeys,
-  defaultConfigQuery,
-  defaultSyncQuery,
-  updateDefaultConfig,
-} from '../../../api/admin';
+import { defaultConfigQuery, defaultSyncQuery } from '../../../api/admin';
 import { defaultListsQuery } from '../../../api/lists';
-import {
-  AllowlistAddresses,
-  AllowlistToggle,
-} from '../../../components/lists/AllowlistCard';
-import type { DefaultConfig } from '../../../types';
 import { Button } from '../../../components/ui/Button';
 import { SITE_URL } from '../../../config/site';
 import { defaultAllowlistAddress } from '../../../lib/allowlistAddress';
+import { UrlField } from '../../../components/ui/UrlField';
 import { Card, CardBody, CardHeader } from '../../../components/ui/Card';
+import { AllowlistSettings } from '../../config/AllowlistSettings';
+import { entriesFromWhitelist } from '../../config/whitelistGroups';
 import { LoadingRegion, PageHeader, Skeleton, Stack } from '../../../components/ui/Layout';
 import { EmptyState, ErrorState } from '../../../components/ui/States';
 import {
@@ -44,36 +37,20 @@ function CardSkeleton({ label }: { label: string }) {
   );
 }
 
-function DefaultAllowlist({ published }: { published: boolean }) {
-  const client = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
-  const mutation = useMutation({
-    mutationFn: (next: boolean) => updateDefaultConfig({ publish_allowlist: next }),
-    onSuccess: (result) => {
-      setError(null);
-      client.setQueryData<DefaultConfig>(adminKeys.defaultConfig(), (current) =>
-        current ? { ...current, publish_allowlist: result.publish_allowlist } : current,
-      );
-    },
-    onError: (cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : 'Try again shortly.');
-    },
-  });
-  const shown =
-    mutation.isPending && typeof mutation.variables === 'boolean' ? mutation.variables : published;
+function DefaultAllowlist({ whitelist, published }: { whitelist: string; published: boolean }) {
   return (
-    <AllowlistToggle
-      published={shown}
-      pending={mutation.isPending}
-      error={error}
-      warning="Like your blocklists, this allowlist is readable by anyone who can reach this instance. It contains this whitelist."
-      onChange={(next) => mutation.mutate(next)}
-    >
-      <AllowlistAddresses
-        subscriptionUrl={defaultAllowlistAddress(SITE_URL)}
-        plainUrl={defaultAllowlistAddress(SITE_URL, 'plain')}
-      />
-    </AllowlistToggle>
+    <Card as="section" aria-labelledby="publish-allowlist">
+      <CardHeader title="Allowlists" titleId="publish-allowlist" />
+      <AllowlistSettings target="default" patterns={entriesFromWhitelist(whitelist)} />
+      {published ? (
+        <CardBody className="grid gap-2 border-t border-border">
+          <p className="text-[13px] text-text-secondary">
+            Adblock is this address. Plain adds ?format=plain. Hosts is not offered.
+          </p>
+          <UrlField url={defaultAllowlistAddress(SITE_URL)} label="Default allowlist" />
+        </CardBody>
+      ) : null}
+    </Card>
   );
 }
 
@@ -157,7 +134,10 @@ export default function DefaultListsPage() {
         {ready ? (
           <>
             <SyncCard config={ready.config} status={ready.status} now={now} />
-            <DefaultAllowlist published={ready.config.publish_allowlist} />
+            <DefaultAllowlist
+              whitelist={ready.config.whitelist}
+              published={ready.config.publish_allowlist}
+            />
             <PublishedLists now={now} />
             <Card as="section" aria-labelledby="default-config">
               <CardHeader
