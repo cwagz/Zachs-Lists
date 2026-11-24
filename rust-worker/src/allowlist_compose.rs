@@ -152,8 +152,7 @@ ads.example.com
 
     fn catalog_source(key: &str) -> AllowlistIdentity {
         let document: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/allowlist-catalog.json"))
-                .unwrap();
+            serde_json::from_str(include_str!("../../backend/app/allowlist_catalog.json")).unwrap();
         let entry = document["sources"]
             .as_array()
             .unwrap()

@@ -54,7 +54,8 @@ WORKDIR /app
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend source
+# Copy backend source. allowlist_catalog.json sits in this tree and is the
+# seed the API reads at runtime; it is not under tests/.
 COPY backend/ ./backend/
 
 # Copy built frontend
