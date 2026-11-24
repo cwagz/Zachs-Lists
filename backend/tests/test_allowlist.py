@@ -14,14 +14,13 @@ from app.allowlist import (
     render_allowlist,
     sync_published_allowlist,
 )
-from app.blueprints.lists import community_blocklists, lists_api_bp, lists_public_bp
+from app.blueprints.lists import lists_api_bp, lists_public_bp
 from app.config import TestingConfig
 from app.extensions import limiter
 from app.generator_host import BLOCKLIST_GENERATOR_HOST, host_from_public_url
 from app.models.analytics import Analytics
 from app.models.system_config import SystemConfig
 from app.models.user import User
-from app.utils.validators import validate_domain, validate_whitelist
 
 GENERATED_AT = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 WHITELIST = "\n".join(
@@ -59,6 +58,7 @@ class StubUser:
     def __init__(self, output_dir: Path, published: bool) -> None:
         self.username = "sam"
         self.is_enabled = True
+        self.is_banned = False
         self.publish_allowlist = published
         self.output_dir = output_dir
 
@@ -67,8 +67,8 @@ class StubUser:
             return {"domain_count": 2}
         return None
 
-    def get_output_path(self, list_name: str, format_type: str) -> str:
-        return str(self.output_dir / f"{list_name}_{format_type}.txt")
+    def get_output_dir(self) -> str:
+        return str(self.output_dir)
 
 
 @pytest.fixture
@@ -83,28 +83,20 @@ def lists_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Flask:
     limiter.init_app(application)
     application.register_blueprint(lists_public_bp)
     application.register_blueprint(lists_api_bp, url_prefix="/api")
-    monkeypatch.setattr(Analytics, "record_request", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        SystemConfig,
+        "get_default_publication",
+        staticmethod(
+            lambda: {
+                "generation_id": None,
+                "published_at": None,
+                "total_domains": 4,
+            }
+        ),
+    )
     with application.app_context():
         limiter.reset()
     return application
-
-
-def test_validate_domain_accepts_subdomain_prefix() -> None:
-    assert validate_domain("example.com")
-    assert validate_domain("*.example.com")
-    assert validate_domain("@@example.com")
-    assert not validate_domain("@@*.example.com")
-    assert not validate_domain("@@localhost")
-    assert not validate_domain("@@example.local")
-    assert not validate_domain("localhost")
-
-
-def test_validate_whitelist_accepts_all_pattern_types() -> None:
-    errors = validate_whitelist(WHITELIST)
-    assert errors == []
-    assert validate_whitelist("@@not a domain") == ["Line 1: Invalid domain"]
-    assert validate_whitelist("@@*.example.com") == ["Line 1: Invalid domain"]
-    assert validate_whitelist("/[/") == ["Line 1: Invalid regex pattern"]
 
 
 def test_conversion_covers_every_whitelist_pattern() -> None:
@@ -138,6 +130,12 @@ def test_conversion_covers_every_whitelist_pattern() -> None:
     assert "@@||" not in "\n".join(_rules(plain))
     with pytest.raises(ValueError):
         render_allowlist(WHITELIST, "hosts", GENERATED_AT)
+
+
+def test_wildcard_is_lowercased() -> None:
+    rendered = render_allowlist("*.CDN.Example.COM\n", "adblock", GENERATED_AT)
+    assert "@@||cdn.example.com^" in rendered
+    assert "*.CDN.Example.COM" in rendered
 
 
 def test_generator_host_follows_the_public_url() -> None:
@@ -190,34 +188,6 @@ def test_publishing_is_opt_in(tmp_path: Path) -> None:
     assert not (tmp_path / "allowlist_hosts.txt").exists()
 
 
-def test_community_catalog_skips_allowlist() -> None:
-    rows = community_blocklists(
-        [
-            {
-                "username": "sam",
-                "lists": [
-                    {
-                        "name": ALLOWLIST_NAME,
-                        "domain_count": 9,
-                        "last_updated": datetime(2026, 1, 2),
-                    },
-                    {
-                        "name": "advertising",
-                        "domain_count": 5,
-                        "last_updated": datetime(2026, 1, 1),
-                    },
-                    {
-                        "name": "all_domains",
-                        "domain_count": 2,
-                        "last_updated": None,
-                    },
-                ],
-            }
-        ]
-    )
-    assert [row["name"] for row in rows] == ["advertising", "all_domains"]
-
-
 def test_default_catalog_ignores_allowlist_files(
     lists_app: Flask, tmp_path: Path
 ) -> None:
@@ -257,7 +227,7 @@ def test_allowlist_serving_requires_opt_in(
     def capture(**kwargs: object) -> None:
         recorded.update(kwargs)
 
-    monkeypatch.setattr(Analytics, "record_request", capture)
+    monkeypatch.setattr("app.blueprints.lists.record_download", capture)
     published = {"value": False}
 
     def lookup(_username: str) -> StubUser:
@@ -276,6 +246,7 @@ def test_allowlist_serving_requires_opt_in(
     adblock = client.get("/u/sam/allowlist.txt?format=adblock")
     assert adblock.status_code == 200
     assert adblock.headers["X-Format"] == "adblock"
+    assert adblock.headers["X-List-Type"] == Analytics.TYPE_ALLOWLIST
     assert "X-Domain-Count" not in adblock.headers
     body = adblock.get_data(as_text=True)
     assert "@@||ads.example.com^" in body

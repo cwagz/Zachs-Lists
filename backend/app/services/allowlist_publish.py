@@ -5,13 +5,14 @@ import os
 from flask import current_app
 
 from app.allowlist import sync_published_allowlist
-from app.generator_host import host_from_public_url
+from app.generator_host import generator_host_from_env
 from app.models.system_config import SystemConfig
 from app.models.user import User
 
 
 def _generator_host() -> str:
-    return host_from_public_url(current_app.config.get("FRONTEND_URL"))
+    """Same host the worker stamps. An explicit override wins over FRONTEND_URL."""
+    return generator_host_from_env()
 
 
 def sync_user_allowlist(user: User) -> None:
@@ -24,10 +25,11 @@ def sync_user_allowlist(user: User) -> None:
 
 
 def sync_default_allowlist() -> None:
+    config = SystemConfig.get_default_config()
     output_dir = os.path.join(current_app.config["DEFAULT_DIR"], "output")
     sync_published_allowlist(
         output_dir,
-        SystemConfig.get_default_whitelist() or "",
-        SystemConfig.is_allowlist_published(),
+        config["whitelist"] or "",
+        config["publish_allowlist"] is True,
         generator=_generator_host(),
     )

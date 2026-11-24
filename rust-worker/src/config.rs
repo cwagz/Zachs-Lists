@@ -20,14 +20,28 @@ pub struct Config {
     pub http_timeout_secs: u64,
     /// Cache TTL in days
     pub cache_ttl_days: u64,
+    pub source_fresh_secs: u64,
     /// How long to keep retrying the initial MongoDB connection, in seconds
     pub mongo_connect_timeout_secs: u64,
+    pub progress_update_interval_ms: u64,
+    pub enforce_domain_limit: bool,
     /// Hostname stamped on generated blocklist files.
     ///
     /// `BLOCKLIST_GENERATOR_HOST` when that variable is set. Otherwise the
-    /// hostname of `FRONTEND_URL`, or the shared fallback constant when that
-    /// URL has no hostname. See `generator_host`.
+    /// hostname of `FRONTEND_URL`, or the shared fallback when that URL has
+    /// no hostname. The same value is part of the build input digest.
     pub generator_host: String,
+}
+
+pub const DEFAULT_TARGET: &str = "__default__";
+pub const DEFAULT_PROGRESS_UPDATE_INTERVAL_MS: u64 = 500;
+pub const MIN_PROGRESS_UPDATE_INTERVAL_MS: u64 = 100;
+
+pub fn progress_update_interval_ms(configured: Option<&str>) -> u64 {
+    configured
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PROGRESS_UPDATE_INTERVAL_MS)
+        .max(MIN_PROGRESS_UPDATE_INTERVAL_MS)
 }
 
 impl Config {
@@ -38,12 +52,8 @@ impl Config {
         Self {
             mongo_uri: env::var("MONGO_URI")
                 .unwrap_or_else(|_| "mongodb://localhost:27017".to_string()),
-            database_name: env::var("DATABASE_NAME")
-                .unwrap_or_else(|_| "blocklist".to_string()),
-            data_dir: PathBuf::from(
-                env::var("DATA_DIR")
-                    .unwrap_or_else(|_| "./data".to_string())
-            ),
+            database_name: env::var("DATABASE_NAME").unwrap_or_else(|_| "blocklist".to_string()),
+            data_dir: PathBuf::from(env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string())),
             worker_id,
             heartbeat_interval_secs: env::var("HEARTBEAT_INTERVAL_SECS")
                 .ok()
@@ -61,10 +71,20 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(7),
+            source_fresh_secs: env::var("SOURCE_FRESH_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
             mongo_connect_timeout_secs: env::var("MONGO_CONNECT_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            progress_update_interval_ms: progress_update_interval_ms(
+                env::var("PROGRESS_UPDATE_INTERVAL_MS").ok().as_deref(),
+            ),
+            enforce_domain_limit: crate::domain_limit::is_enforced(
+                env::var("ENFORCE_DOMAIN_LIMIT").ok().as_deref(),
+            ),
             generator_host: crate::generator_host::from_env(),
         }
     }
@@ -81,10 +101,23 @@ impl Config {
 
     /// Get output directory for a user (output files still on filesystem for nginx)
     pub fn output_dir(&self, username: &str) -> PathBuf {
-        if username == "__default__" {
+        if username == DEFAULT_TARGET {
             self.default_dir().join("output")
         } else {
             self.user_dir(username).join("output")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_interval_defaults_and_has_a_floor() {
+        assert_eq!(progress_update_interval_ms(None), 500);
+        assert_eq!(progress_update_interval_ms(Some("not a number")), 500);
+        assert_eq!(progress_update_interval_ms(Some("250")), 250);
+        assert_eq!(progress_update_interval_ms(Some("5")), 100);
     }
 }

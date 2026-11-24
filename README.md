@@ -230,7 +230,7 @@ Want to run your own instance? Full deployment instructions (Docker + manual) ar
 
 Copy `.env.example` to `.env`. `ROOT_USERNAME` is the root admin's GitHub login. Production also requires `ROOT_GITHUB_ID`, that account's numeric GitHub user id. Find it at `https://api.github.com/users/<username>`. See `.env.example`.
 
-Generated list headers name this instance. The hostname comes from `FRONTEND_URL`, and falls back to `lists.zachlagden.uk` when that URL has no hostname, so the public instance's files stay the same. The container entrypoint passes the resolved host to the worker as `BLOCKLIST_GENERATOR_HOST`. Leave that variable unset unless you need to override it. The worker stores that hostname with the last config hash and skips a manual rebuild only when the hash, the hostname, and the cached sources are all unchanged, so changing the hostname regenerates list files. See `.env.example`.
+Generated list headers name this instance. The hostname comes from `FRONTEND_URL`, and falls back to `lists.zachlagden.uk` when that URL has no hostname, so a public instance that still uses that name keeps the same header text. The container entrypoint passes the resolved host to the worker as `BLOCKLIST_GENERATOR_HOST`. Leave that variable unset unless you need to override it. The worker includes the hostname in the build's input digest and skips a rebuild only when that digest still matches the published generation, so changing the hostname regenerates list files. The first build after upgrading does not match digests written before the hostname was included, and publishes again. See `.env.example`.
 
 ---
 
