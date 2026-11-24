@@ -4,6 +4,8 @@ Authentication blueprint - GitHub OAuth.
 
 import secrets
 import re
+from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlencode
 from functools import wraps
 from flask import (
@@ -14,14 +16,72 @@ from flask import (
     session,
     jsonify,
     current_app,
-    url_for,
 )
 import requests
 
+from app.extensions import limiter
 from app.models.user import User
 from app.utils.client_ip import get_client_ip
+from app.utils.rate_limits import configured_limit
+from app.utils.time import utc_iso
 
 auth_bp = Blueprint("auth", __name__)
+
+
+SessionRefusal = Literal["signed_out", "unknown_user", "stale", "disabled", "banned"]
+
+
+@dataclass(frozen=True)
+class SessionCheck:
+    user: User | None
+    refusal: SessionRefusal | None
+    refused_account: User | None = None
+
+
+def _session_refusal(user: User | None) -> SessionRefusal | None:
+    if user is None:
+        return "unknown_user"
+    if session.get("auth_version", 0) != user.auth_version:
+        return "stale"
+    if not user.is_enabled:
+        return "disabled"
+    if user.is_banned:
+        return "banned"
+    return None
+
+
+def check_session() -> SessionCheck:
+    user_id = session.get("user_id")
+    if not user_id:
+        return SessionCheck(None, "signed_out")
+    user = User.get_by_id(user_id)
+    refusal = _session_refusal(user)
+    if refusal is None:
+        return SessionCheck(user, None)
+    session.clear()
+    return SessionCheck(None, refusal, user)
+
+
+def session_user() -> User | None:
+    return check_session().user
+
+
+def _refusal_response(check: SessionCheck) -> tuple[Response, int]:
+    if check.refusal == "signed_out":
+        return jsonify({"error": "Authentication required"}), 401
+    if check.refusal == "unknown_user":
+        return jsonify({"error": "User not found"}), 401
+    if check.refusal == "stale":
+        return jsonify({"error": "Session expired; sign in again"}), 401
+    if check.refusal == "disabled":
+        return jsonify({"error": "Account disabled"}), 403
+    ban_info: dict[str, str | None] = {"error": "Account banned"}
+    account = check.refused_account
+    if account is not None and account.ban_reason:
+        ban_info["reason"] = account.ban_reason
+    if account is not None and account.banned_until:
+        ban_info["until"] = utc_iso(account.banned_until)
+    return jsonify(ban_info), 403
 
 
 def login_required(f):
@@ -29,33 +89,10 @@ def login_required(f):
 
     @wraps(f)
     def decorated(*args, **kwargs):
-        user_id = session.get("user_id")
-        if not user_id:
-            return jsonify({"error": "Authentication required"}), 401
-
-        user = User.get_by_id(user_id)
-        if not user:
-            session.clear()
-            return jsonify({"error": "User not found"}), 401
-
-        if session.get("auth_version", 0) != user.auth_version:
-            session.clear()
-            return jsonify({"error": "Session expired; sign in again"}), 401
-
-        if not user.is_enabled:
-            session.clear()
-            return jsonify({"error": "Account disabled"}), 403
-
-        if user.is_banned:
-            session.clear()
-            ban_info = {"error": "Account banned"}
-            if user.ban_reason:
-                ban_info["reason"] = user.ban_reason
-            if user.banned_until:
-                ban_info["until"] = user.banned_until.isoformat()
-            return jsonify(ban_info), 403
-
-        return f(user, *args, **kwargs)
+        check = check_session()
+        if check.user is None:
+            return _refusal_response(check)
+        return f(check.user, *args, **kwargs)
 
     return decorated
 
@@ -208,6 +245,21 @@ def github_callback():
             name=user_data.get("name"),  # GitHub display name
         )
 
+        if not user.is_enabled:
+            current_app.logger.info(f"Disabled user {user.username} refused at login")
+            return redirect(
+                f"{current_app.config['FRONTEND_URL']}/login?error=account_disabled"
+            )
+        if user.is_banned:
+            current_app.logger.info(f"Banned user {user.username} refused at login")
+            refusal = {"error": "account_banned"}
+            ban_ends_at = utc_iso(user.ban_ends_at)
+            if ban_ends_at:
+                refusal["until"] = ban_ends_at
+            return redirect(
+                f"{current_app.config['FRONTEND_URL']}/login?{urlencode(refusal)}"
+            )
+
         # Set session
         session.permanent = True
         session["user_id"] = str(user.id)
@@ -238,7 +290,20 @@ def logout():
     return jsonify({"success": True})
 
 
+@auth_bp.route("/session")
+@limiter.limit(configured_limit("RATELIMIT_AUTH_ME"))
+def get_session() -> Response:
+    user = session_user()
+    if user is None:
+        return jsonify({"user": None})
+    ip = get_client_ip()
+    if ip != "unknown":
+        user.log_ip_access(ip)
+    return jsonify({"user": user.to_dict()})
+
+
 @auth_bp.route("/me")
+@limiter.limit(configured_limit("RATELIMIT_AUTH_ME"))
 @login_required
 def get_current_user(user: User) -> Response:
     ip = get_client_ip()

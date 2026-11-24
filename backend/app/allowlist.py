@@ -7,12 +7,18 @@ Regex, wildcards inside the rule, and ``$`` modifiers are not supported.
 
 import gzip
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.generator_host import BLOCKLIST_GENERATOR_HOST
-from app.utils.validators import validate_domain
+
+_MAX_DOMAIN_LENGTH = 253
+_DOMAIN = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 ALLOWLIST_NAME = "allowlist"
 BLOCKLIST_FORMATS = ("hosts", "plain", "adblock")
@@ -139,12 +145,24 @@ def remove_published_allowlist(output_dir: str | Path) -> None:
     _remove_paths(_artifact_paths(directory))
 
 
+def _is_domain(value: str) -> bool:
+    """A DNS name this allowlist can emit. Local names are refused."""
+    if (
+        not value
+        or len(value) > _MAX_DOMAIN_LENGTH
+        or value == "localhost"
+        or value.endswith(".local")
+    ):
+        return False
+    return _DOMAIN.fullmatch(value) is not None
+
+
 def _classify(pattern: str) -> ParsedWhitelistEntry:
     if len(pattern) > 2 and pattern.startswith("/") and pattern.endswith("/"):
         return ParsedWhitelistEntry(_KIND_REGEX, pattern, None)
     if pattern.startswith("@@"):
         domain = pattern[2:].lower()
-        if validate_domain(domain):
+        if _is_domain(domain):
             return ParsedWhitelistEntry(_KIND_SUBDOMAIN, pattern, domain)
         return ParsedWhitelistEntry(_KIND_UNSUPPORTED, pattern, None)
     if "*" in pattern:
@@ -152,14 +170,14 @@ def _classify(pattern: str) -> ParsedWhitelistEntry:
         if (
             pattern.startswith("*.")
             and "*" not in remainder
-            and validate_domain(remainder.lower())
+            and _is_domain(remainder.lower())
         ):
             return ParsedWhitelistEntry(
                 _KIND_WILDCARD_SUBDOMAIN, pattern, remainder.lower()
             )
         return ParsedWhitelistEntry(_KIND_UNSUPPORTED, pattern, None)
     domain = pattern.lower()
-    if validate_domain(domain):
+    if _is_domain(domain):
         return ParsedWhitelistEntry(_KIND_EXACT, pattern, domain)
     return ParsedWhitelistEntry(_KIND_UNSUPPORTED, pattern, None)
 

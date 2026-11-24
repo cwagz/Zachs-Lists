@@ -1,10 +1,10 @@
-// User types
 export interface User {
   id: string;
   username: string;
-  name?: string; // GitHub display name
-  email?: string;
-  avatar_url?: string;
+  github_username: string;
+  name: string | null;
+  email: string | null;
+  avatar_url: string | null;
   is_admin: boolean;
   is_root: boolean;
   is_enabled: boolean;
@@ -12,8 +12,9 @@ export interface User {
   stats: UserStats;
   lists: UserList[];
   notifications: Notification[];
+  limit_review: LimitReview | null;
   remaining_updates: number;
-  created_at: string;
+  created_at: string | null;
 }
 
 export interface UserLimits {
@@ -28,25 +29,27 @@ export interface UserStats {
   total_output_size_bytes: number;
   last_build_at: string | null;
   manual_updates_this_week: number;
-  week_reset_at: string;
+  week_reset_at: string | null;
 }
 
 export interface UserList {
   name: string;
-  formats: string[];
+  is_public?: boolean;
+  formats: ListFormat[];
   domain_count: number;
   last_updated: string;
 }
 
-// Job types
+export type ListFormat = 'hosts' | 'plain' | 'adblock';
+
 export type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'skipped';
 export type JobStage = 'queue' | 'downloading' | 'whitelist' | 'generation' | 'completed';
 export type SourceStatus = 'pending' | 'downloading' | 'processing' | 'completed' | 'failed';
 
-// Queue info for queued jobs (sent via WebSocket)
 export interface QueueInfo {
   position: number;
   total_queued: number;
+  workers_alive?: number;
   active_workers: number;
   jobs_processing: number;
 }
@@ -56,54 +59,55 @@ export interface Job {
   job_id: string;
   user_id: string | null;
   username: string;
-  type: 'manual' | 'scheduled' | 'admin';
+  target_id?: string | null;
+  type: JobType;
   status: JobStatus;
+  priority?: number;
   progress: EnhancedJobProgress;
-  queue_info?: QueueInfo; // Present for queued jobs
-  result?: JobResult;
-  started_at?: string;
-  completed_at?: string;
+  queue_info?: QueueInfo;
+  result?: JobResult | null;
+  started_at?: string | null;
+  attempt_started_at?: string | null;
+  completed_at?: string | null;
   created_at: string;
+  worker_id?: string | null;
   read?: boolean;
+  force_rebuild?: boolean;
+  attempts?: number;
+  rev?: number;
+  updated_at?: string | null;
 }
 
-// Legacy progress interface for backward compatibility
-export interface JobProgress {
-  current_step: string;
-  total_sources: number;
-  processed_sources: number;
-  current_source?: string;
-}
+export type JobType = 'manual' | 'scheduled' | 'admin';
 
-// Format breakdown for a source (hosts/plain/adblock counts)
 export interface FormatBreakdown {
   hosts: number;
   plain: number;
   adblock: number;
 }
 
-// Source progress for downloading stage
 export interface SourceProgress {
   id: string;
   name: string;
   url: string;
+  category: string | null;
   status: SourceStatus;
   cache_hit: boolean | null;
+  stale: boolean;
   bytes_downloaded: number;
   bytes_total: number | null;
   download_percent: number | null;
   download_time_ms: number | null;
   domain_count: number | null;
   domain_change: number | null;
-  format_breakdown?: FormatBreakdown;
-  detected_formats?: string[]; // e.g., ["hosts", "adblock"]
+  format_breakdown: FormatBreakdown | null;
+  detected_formats: string[];
   error: string | null;
-  warnings?: string[];
+  warnings: string[];
   started_at: string | null;
   completed_at: string | null;
 }
 
-// Whitelist pattern progress
 export interface WhitelistPatternProgress {
   pattern: string;
   pattern_type: 'exact' | 'wildcard' | 'regex' | 'subdomain';
@@ -111,19 +115,20 @@ export interface WhitelistPatternProgress {
   samples: string[];
 }
 
-// Whitelist stage progress
 export interface WhitelistProgress {
   domains_before: number;
   domains_after: number;
+  domains_checked: number;
   total_removed: number;
-  patterns: WhitelistPatternProgress[];
   processing: boolean;
+  patterns_total: number;
+  patterns: WhitelistPatternProgress[];
+  warnings: string[];
 }
 
-// Output format generation progress
 export interface FormatProgress {
   format: 'hosts' | 'plain' | 'adblock';
-  status: 'pending' | 'generating' | 'compressing' | 'completed';
+  status: 'pending' | 'generating' | 'completed';
   domains_written: number;
   total_domains: number;
   percent: number;
@@ -131,44 +136,41 @@ export interface FormatProgress {
   gz_size: number | null;
 }
 
-// Generation stage progress
 export interface GenerationProgress {
-  formats: FormatProgress[];
+  files_total: number;
+  files_completed: number;
   current_format: string | null;
+  formats: FormatProgress[];
 }
 
-// Snapshot of a stage's final state
 export interface StageSnapshot {
   completed_at: string;
-  data: unknown; // Stage-specific data
+  data: unknown;
 }
 
-// Enhanced job progress with all stages
+export interface StageTiming {
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface StageTimings {
+  downloading: StageTiming | null;
+  whitelist: StageTiming | null;
+  generation: StageTiming | null;
+}
+
 export interface EnhancedJobProgress {
   stage: JobStage;
-
-  // Queue stage
   queue_position: number | null;
   queue_delay_remaining_ms: number | null;
-
-  // Downloading stage
   total_sources: number;
   processed_sources: number;
   sources: SourceProgress[];
-
-  // Whitelist stage
   whitelist: WhitelistProgress | null;
-
-  // Generation stage
   generation: GenerationProgress | null;
-
-  // Timing
   stage_started_at: string | null;
-
-  // Stage snapshots for viewing historical state
-  stage_snapshots?: Record<string, StageSnapshot>;
-
-  // Legacy compatibility
+  stages: StageTimings;
+  stage_snapshots: Record<string, StageSnapshot>;
   current_step: string;
   current_source: string | null;
 }
@@ -176,14 +178,23 @@ export interface EnhancedJobProgress {
 export interface JobResult {
   sources_processed: number;
   sources_failed: number;
+  sources_stale: number;
   total_domains: number;
   unique_domains: number;
   whitelisted_removed: number;
   output_files: OutputFile[];
-  categories?: Record<string, number>;
+  categories: Record<string, number>;
   errors: string[];
-  skip_reason?: string;
-  copied_from?: string; // Username whose build was copied (fingerprint match)
+  warnings: string[];
+  error_code: string | null;
+  skip_reason: string | null;
+  generation_id: string | null;
+  limit: JobLimitMeasurement | null;
+}
+
+export interface JobLimitMeasurement {
+  max_domains: number | null;
+  actual_domains: number;
 }
 
 export interface OutputFile {
@@ -193,45 +204,69 @@ export interface OutputFile {
   domain_count: number;
 }
 
-// Analytics types
-export interface AnalyticsStats {
-  total_requests: number;
-  total_unique_ips: number;
-  total_bandwidth: number;
-  formats: {
-    hosts: number;
-    plain: number;
-    adblock: number;
-  };
-}
-
-export interface DailyStats {
-  date: string;
+export interface AnalyticsTotals {
   requests: number;
-  unique_ips: number;
-  bandwidth: number;
+  unique_visitors: number;
+  bandwidth_bytes: number;
 }
 
-export interface GeoStats {
-  countries: Record<string, number>;
+export interface AnalyticsDay extends AnalyticsTotals {
+  date: string;
 }
 
-export interface PublicStats {
-  total_domains: number;
-  total_requests: number;
-  total_bandwidth_bytes: number;
-  user_count: number;
+export interface AnalyticsFormats {
+  hosts: number;
+  plain: number;
+  adblock: number;
 }
 
-// Default list types
+export interface AnalyticsCountry {
+  code: string;
+  requests: number;
+}
+
+export interface AnalyticsCity {
+  country: string;
+  city: string;
+  requests: number;
+}
+
+export interface AnalyticsReferrer {
+  host: string;
+  requests: number;
+}
+
+export interface PublicAnalyticsReport {
+  period_days: number;
+  totals: AnalyticsTotals;
+  daily: AnalyticsDay[];
+  formats: AnalyticsFormats;
+}
+
+export interface AnalyticsReport extends PublicAnalyticsReport {
+  hourly: number[];
+  top_countries: AnalyticsCountry[];
+  top_cities: AnalyticsCity[];
+  top_referrers: AnalyticsReferrer[];
+}
+
+export interface AdminAnalytics {
+  period_days: number;
+  overall: AnalyticsReport;
+  default_lists: AnalyticsReport;
+  user_lists: AnalyticsReport;
+}
+
 export interface DefaultList {
   name: string;
-  formats: string[];
+  formats: ListFormat[];
   size_bytes: number;
   domain_count?: number;
+  last_updated?: string | null;
+  published_at?: string | null;
+  generation_id?: string | null;
 }
 
-// Featured list types
 export interface FeaturedList {
   id: string;
   username: string;
@@ -240,7 +275,6 @@ export interface FeaturedList {
   order: number;
 }
 
-// Admin types
 export interface AdminUser extends User {
   github_id: number;
 }
@@ -264,10 +298,13 @@ export interface AdminStats {
   analytics: {
     total_requests: number;
     total_bandwidth: number;
+    period_days: number;
+  };
+  limits: {
+    enforce_domain_limit: boolean;
   };
 }
 
-// Announcement types
 export interface Announcement {
   id: string;
   title: string;
@@ -280,7 +317,6 @@ export interface Announcement {
   updated_at: string;
 }
 
-// Notification types
 export interface Notification {
   id: string;
   type: 'limit_request_approved' | 'limit_request_denied' | string;
@@ -291,30 +327,103 @@ export interface Notification {
   created_at: string;
 }
 
-// Limit Request types
 export interface LimitRequest {
   id: string;
   user_id: string;
   username: string;
-  avatar_url?: string;
+  avatar_url?: string | null;
   current_limit: number;
   requested_tier: number;
   reason: string;
   intended_use: 'personal' | 'family' | 'organization' | 'other';
   current_usage: number;
-  status: 'pending' | 'approved' | 'denied';
-  approved_limit?: number;
-  admin_response?: string;
-  reviewed_by?: string;
+  status: 'pending' | 'approved' | 'denied' | 'superseded';
+  approved_limit?: number | null;
+  admin_response?: string | null;
+  reviewed_by?: string | null;
   created_at: string;
-  reviewed_at?: string;
+  reviewed_at?: string | null;
 }
 
 export type IntendedUse = 'personal' | 'family' | 'organization' | 'other';
 
 export const INTENDED_USE_LABELS: Record<IntendedUse, string> = {
-  personal: 'Personal Use',
-  family: 'Family Network',
-  organization: 'Organization/Business',
+  personal: 'Personal use',
+  family: 'Family network',
+  organization: 'Organisation or business',
   other: 'Other',
 };
+
+export interface LimitReview {
+  actual_domains: number;
+  max_domains: number;
+  method: string;
+  detected_at: string | null;
+  notified_at: string | null;
+  status: 'open' | 'resolved';
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolved_reason: string | null;
+}
+
+export interface AdminLimitReview {
+  user_id: string;
+  username: string;
+  max_domains: number;
+  actual_domains: number;
+  percent_over: number;
+  method: string | null;
+  detected_at: string | null;
+  notified: boolean;
+  has_pending_request: boolean;
+}
+
+export interface DefaultSyncSource {
+  repo: string | null;
+  commit_sha: string | null;
+  commit_date: string | null;
+  blocklists_sha256: string | null;
+  whitelist_sha256: string | null;
+  synced_at: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+}
+
+export interface DefaultConfig {
+  config: string;
+  whitelist: string;
+  publish_allowlist: boolean;
+  sync_enabled: boolean;
+  source: DefaultSyncSource | null;
+}
+
+export interface DefaultSyncStatus {
+  sync_enabled: boolean;
+  repo: string;
+  revision: number;
+  source: DefaultSyncSource | null;
+}
+
+export interface DefaultSyncOutcome {
+  status: 'updated' | 'unchanged' | 'failed';
+  changed: boolean;
+  commit_changed: boolean;
+  commit_sha: string | null;
+  source_count: number | null;
+  error: string | null;
+  can_force: boolean;
+}
+
+export interface DefaultSyncRun extends DefaultSyncStatus {
+  sync: DefaultSyncOutcome | null;
+  job_id: string | null;
+  build_refusal: string | null;
+}
+
+export interface AdminLimitReviewPage {
+  reviews: AdminLimitReview[];
+  page: number;
+  per_page: number;
+  total: number;
+  pages: number;
+}

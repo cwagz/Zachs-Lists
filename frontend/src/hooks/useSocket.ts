@@ -1,13 +1,10 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { Job } from '../types';
-import { getSocket, socket } from './socketConnection';
-export { disconnectSocket } from './socketConnection';
-
-interface JobSkippedData {
-  job_id: string;
-  reason: string;
-}
+import { useConnectionStore } from '../store';
+import { resyncJobs, type JobsSubscription } from '../realtime/resync';
+import { createRoomSubscribers } from '../realtime/roomSubscribers';
+import { getSocket, hasReconnected } from './socketConnection';
 
 interface UseJobSocketOptions {
   userId?: string;
@@ -15,128 +12,114 @@ interface UseJobSocketOptions {
   onJobCreated?: (job: Job) => void;
   onJobProgress?: (job: Job) => void;
   onJobCompleted?: (job: Job) => void;
-  onJobSkipped?: (data: JobSkippedData) => void;
+  onReconnect?: () => void;
+  knownJobs: () => Job[];
+  fetchJob: (jobId: string) => Promise<Job>;
+  onJobsSynced: (jobs: Job[]) => void;
+  onResyncFailed: (jobIds: string[]) => void;
 }
 
-/**
- * Hook for subscribing to job updates via WebSocket.
- *
- * Events:
- * - job:created - New job was created
- * - job:progress - Job progress updated (every 500ms when state changes)
- * - job:completed - Job finished (success/fail/skip)
- * - job:skipped - Job was skipped
- */
+const jobRoomSubscribers = createRoomSubscribers();
+
+interface UseSocketResult {
+  isConnected: boolean;
+}
+
+function useIsConnected(): boolean {
+  return useConnectionStore((connection) => connection.state === 'connected');
+}
+
 export function useJobSocket({
   userId,
   isAdmin = false,
   onJobCreated,
   onJobProgress,
   onJobCompleted,
-  onJobSkipped,
-}: UseJobSocketOptions) {
-  const socketRef = useRef<Socket | null>(null);
-  const subscribedRef = useRef(false);
-
-  // Store callbacks in a ref to avoid re-running the effect when they change
+  onReconnect,
+  knownJobs,
+  fetchJob,
+  onJobsSynced,
+  onResyncFailed,
+}: UseJobSocketOptions): UseSocketResult {
   const callbacksRef = useRef({
     onJobCreated,
     onJobProgress,
     onJobCompleted,
-    onJobSkipped,
+    onReconnect,
+    knownJobs,
+    fetchJob,
+    onJobsSynced,
+    onResyncFailed,
   });
 
-  // Update the ref on every render so handlers always call latest callbacks
   useEffect(() => {
     callbacksRef.current = {
       onJobCreated,
       onJobProgress,
       onJobCompleted,
-      onJobSkipped,
+      onReconnect,
+      knownJobs,
+      fetchJob,
+      onJobsSynced,
+      onResyncFailed,
     };
   });
 
-  const subscribe = useCallback(() => {
-    const s = getSocket();
-    socketRef.current = s;
-
-    if (subscribedRef.current || !s.connected) return;
-
-    // Subscribe to appropriate room
-    if (isAdmin) {
-      s.emit('subscribe:jobs', { all: true });
-    } else if (userId) {
-      s.emit('subscribe:jobs', { user_id: userId });
-    }
-
-    subscribedRef.current = true;
-  }, [userId, isAdmin]);
-
-  const unsubscribe = useCallback(() => {
-    const s = socketRef.current;
-    if (!s || !subscribedRef.current) return;
-
-    if (isAdmin) {
-      s.emit('unsubscribe:jobs', { all: true });
-    } else if (userId) {
-      s.emit('unsubscribe:jobs', { user_id: userId });
-    }
-
-    subscribedRef.current = false;
-  }, [userId, isAdmin]);
-
   useEffect(() => {
+    const room = isAdmin ? { all: true } : userId ? { user_id: userId } : null;
+    if (!room) return;
     const s = getSocket();
-    socketRef.current = s;
+    let mounted = true;
+    let subscribed = false;
 
-    // Set up event listeners - read from ref to always get latest callbacks
-    const handleJobCreated = (job: Job) => {
-      callbacksRef.current.onJobCreated?.(job);
+    const catchUp = async (subscription: JobsSubscription, reconnected: boolean) => {
+      if (!mounted || subscription.error) return;
+      const unresolved = await resyncJobs({
+        known: callbacksRef.current.knownJobs(),
+        subscription,
+        apply: (jobs) => {
+          if (mounted) callbacksRef.current.onJobsSynced(jobs);
+        },
+        fetchJob: (jobId) => callbacksRef.current.fetchJob(jobId),
+      });
+      if (unresolved.length > 0) callbacksRef.current.onResyncFailed(unresolved);
+      if (mounted && reconnected) callbacksRef.current.onReconnect?.();
     };
 
-    const handleJobProgress = (job: Job) => {
-      callbacksRef.current.onJobProgress?.(job);
+    const roomKey = JSON.stringify(room);
+    const subscribe = (reconnected: boolean) => {
+      if (!subscribed) jobRoomSubscribers.join(roomKey);
+      subscribed = true;
+      s.emit('subscribe:jobs', room, (subscription: JobsSubscription) => {
+        void catchUp(subscription, reconnected);
+      });
     };
 
-    const handleJobCompleted = (job: Job) => {
-      callbacksRef.current.onJobCompleted?.(job);
-    };
+    const handleJobCreated = (job: Job) => callbacksRef.current.onJobCreated?.(job);
+    const handleJobProgress = (job: Job) => callbacksRef.current.onJobProgress?.(job);
+    const handleJobCompleted = (job: Job) => callbacksRef.current.onJobCompleted?.(job);
+    const handleConnect = () => subscribe(hasReconnected());
 
-    const handleJobSkipped = (data: JobSkippedData) => {
-      callbacksRef.current.onJobSkipped?.(data);
-    };
-
-    // Register event listeners
     s.on('job:created', handleJobCreated);
     s.on('job:progress', handleJobProgress);
     s.on('job:completed', handleJobCompleted);
-    s.on('job:skipped', handleJobSkipped);
-    const handleConnect = () => {
-      subscribedRef.current = false;
-      subscribe();
-    };
     s.on('connect', handleConnect);
-    if (s.connected) handleConnect();
+    if (s.connected) subscribe(false);
 
-    // Cleanup on unmount
     return () => {
+      mounted = false;
       s.off('job:created', handleJobCreated);
       s.off('job:progress', handleJobProgress);
       s.off('job:completed', handleJobCompleted);
-      s.off('job:skipped', handleJobSkipped);
       s.off('connect', handleConnect);
-      unsubscribe();
+      if (!subscribed) return;
+      const lastSubscriber = jobRoomSubscribers.leave(roomKey);
+      if (lastSubscriber && s.connected) s.emit('unsubscribe:jobs', room);
     };
-  }, [subscribe, unsubscribe]);
+  }, [userId, isAdmin]);
 
-  return {
-    isConnected: socket?.connected ?? false,
-    subscribe,
-    unsubscribe,
-  };
+  return { isConnected: useIsConnected() };
 }
-
-// Validation progress types
 interface ValidationProgress {
   current: number;
   total: number;
@@ -163,10 +146,6 @@ interface UseValidationSocketOptions {
   onProgress?: (progress: ValidationProgress) => void;
   onComplete?: (result: ValidationResult) => void;
 }
-
-/**
- * Hook for subscribing to config validation progress.
- */
 export function useValidationSocket({
   userId,
   onProgress,
@@ -174,8 +153,6 @@ export function useValidationSocket({
 }: UseValidationSocketOptions) {
   const socketRef = useRef<Socket | null>(null);
   const subscribedRef = useRef(false);
-
-  // Store callbacks in ref
   const callbacksRef = useRef({ onProgress, onComplete });
 
   useEffect(() => {
@@ -236,57 +213,8 @@ export function useValidationSocket({
   }, [userId, subscribe, unsubscribe]);
 
   return {
-    isConnected: socket?.connected ?? false,
+    isConnected: useIsConnected(),
     subscribe,
     unsubscribe,
-  };
-}
-
-interface UseStatsSocketOptions {
-  onStatsUpdated?: () => void;
-}
-
-/**
- * Hook for subscribing to admin stats updates.
- */
-export function useStatsSocket({ onStatsUpdated }: UseStatsSocketOptions) {
-  const socketRef = useRef<Socket | null>(null);
-  const subscribedRef = useRef(false);
-
-  // Store callback in ref
-  const callbackRef = useRef(onStatsUpdated);
-
-  useEffect(() => {
-    callbackRef.current = onStatsUpdated;
-  });
-
-  useEffect(() => {
-    const s = getSocket();
-    socketRef.current = s;
-
-    const handleStatsUpdated = () => {
-      callbackRef.current?.();
-    };
-
-    s.on('stats:updated', handleStatsUpdated);
-    const handleConnect = () => {
-      s.emit('subscribe:stats');
-      subscribedRef.current = true;
-    };
-    s.on('connect', handleConnect);
-    if (s.connected) handleConnect();
-
-    return () => {
-      s.off('stats:updated', handleStatsUpdated);
-      s.off('connect', handleConnect);
-      if (subscribedRef.current) {
-        s.emit('unsubscribe:stats');
-        subscribedRef.current = false;
-      }
-    };
-  }, []);
-
-  return {
-    isConnected: socket?.connected ?? false,
   };
 }
