@@ -11,7 +11,7 @@ from app.allowlist_selection import (
 from app.models.blocklist_library import BlocklistLibrary
 from app.services.allowlist_seed import ensure_allowlist_catalog
 from app.utils.validators import MAX_CONFIG_SOURCES
-from tests.conftest import Api
+from conftest import Api
 
 
 def test_catalog_seeds_only_missing_rows_and_keeps_the_url_unique(api: Api) -> None:
