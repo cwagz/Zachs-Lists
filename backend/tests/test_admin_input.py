@@ -736,10 +736,18 @@ def test_valid_default_config_is_saved_in_one_document(
         json={"config": VALID_SOURCES, "whitelist": "allowed.example.com"},
     )
     assert saved.status_code == 200
-    assert admin_client.get("/api/admin/default/config").get_json() == {
+    shown = admin_client.get("/api/admin/default/config").get_json()
+    assert sorted(item["license"] for item in shown.pop("allowlist_catalog")) == [
+        "GPL-3.0",
+        "MIT",
+    ]
+    assert shown == {
         "config": VALID_SOURCES,
         "whitelist": "allowed.example.com",
         "publish_allowlist": False,
+        "apply_whitelist_to_blocklists": True,
+        "allowlist_sources": [],
+        "allowlist_reports": [],
         "sync_enabled": False,
         "source": None,
     }

@@ -6,6 +6,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
+from app.allowlist_selection import allowlist_view
 from app.extensions import mongo
 from app.models.job import Job
 from app.models.system_config import SystemConfig
@@ -178,10 +179,14 @@ def _admit_user_build(
         raise AdmissionError("no_config", "No blocklist configuration found", 400)
 
     limits = user.limits
+    preferences = allowlist_view(user.config)
     config_snapshot: dict[str, Any] = {
         "blocklists": blocklists,
         "whitelist": user.get_config("whitelist.txt") or "",
         "revision": user.config_revision,
+        "allowlist_sources": preferences["allowlist_sources"],
+        "apply_whitelist_to_blocklists": preferences["apply_whitelist_to_blocklists"],
+        "publish_allowlist": user.publish_allowlist,
         "limits": {
             "max_domains": None if user.is_admin else limits["max_domains"],
             "max_source_lists": limits["max_source_lists"],
@@ -238,10 +243,14 @@ def _admit_user_build(
 
 def _admit_default_build(job_type: str, force_rebuild: bool) -> Job:
     stored = SystemConfig.get_default_config()
+    preferences = allowlist_view(stored)
     config_snapshot: dict[str, Any] = {
         "blocklists": pin_repository_sources(stored["blocklists"]),
         "whitelist": stored["whitelist"],
         "revision": None,
+        "allowlist_sources": preferences["allowlist_sources"],
+        "apply_whitelist_to_blocklists": preferences["apply_whitelist_to_blocklists"],
+        "publish_allowlist": stored["publish_allowlist"] is True,
         "limits": None,
     }
     _refuse_invalid_config(stored["blocklists"], MAX_CONFIG_SOURCES)

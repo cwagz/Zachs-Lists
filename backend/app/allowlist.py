@@ -140,6 +140,32 @@ def sync_published_allowlist(
     _remove_paths(_hosts_artifacts(directory))
 
 
+def published_allowlist_summary(
+    output_dir: str | Path,
+) -> dict[str, int | str | None] | None:
+    """Rule count and timestamp from the file the worker or API already wrote."""
+    path = Path(output_dir) / f"{ALLOWLIST_NAME}_adblock.txt.gz"
+    if not path.is_file():
+        return None
+    rule_count: int | None = None
+    published_at: str | None = None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+            for _ in range(16):
+                line = handle.readline()
+                if not line:
+                    break
+                if line.startswith("# Allow rules:"):
+                    raw = line.split(":", 1)[1].strip()
+                    if raw.isdigit():
+                        rule_count = int(raw)
+                elif line.startswith("# Generated:"):
+                    published_at = line[len("# Generated:") :].strip() or None
+    except OSError:
+        return None
+    return {"rule_count": rule_count, "published_at": published_at}
+
+
 def remove_published_allowlist(output_dir: str | Path) -> None:
     directory = Path(output_dir)
     _remove_paths(_artifact_paths(directory))

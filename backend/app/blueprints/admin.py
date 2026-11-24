@@ -15,7 +15,15 @@ from app.models.job import Job
 from app.models.cache import CacheMetadata
 from app.models.analytics import Analytics
 from app.models.system_config import SystemConfig
+from app.allowlist_catalog import NOWHERE_CODE, NOWHERE_MESSAGE
+from app.allowlist_selection import (
+    allowlist_view,
+    resolve_allowlist_selection,
+    whitelist_applies_nowhere,
+)
 from app.services.allowlist_publish import sync_default_allowlist
+from app.services.allowlist_seed import allowlist_entries
+from app.utils.validators import MAX_CONFIG_SOURCES
 from app.models.blocklist_library import BlocklistLibrary
 from app.models.announcement import Announcement
 from app.models.featured_list import FeaturedList
@@ -521,6 +529,8 @@ def get_default_config(admin: User):
             "publish_allowlist": config_data["publish_allowlist"],
             "sync_enabled": status["sync_enabled"],
             "source": status["source"],
+            "allowlist_catalog": [entry.to_dict() for entry in allowlist_entries()],
+            **allowlist_view(config_data),
         }
     )
 
@@ -531,6 +541,25 @@ def update_default_config(admin: User):
     """Update default lists configuration in MongoDB."""
     data = json_object()
     publish_allowlist = optional_bool(data, "publish_allowlist")
+    apply_sent = "apply_whitelist_to_blocklists" in data
+    apply_whitelist = (
+        optional_bool(data, "apply_whitelist_to_blocklists") if apply_sent else None
+    )
+    if apply_sent and apply_whitelist is None:
+        return (
+            jsonify({"error": "apply_whitelist_to_blocklists must be a boolean"}),
+            400,
+        )
+    sources_sent = "allowlist_sources" in data
+    selected = None
+    if sources_sent:
+        selected, error = resolve_allowlist_selection(
+            data.get("allowlist_sources"),
+            [entry.to_dict() for entry in allowlist_entries()],
+            MAX_CONFIG_SOURCES,
+        )
+        if error:
+            return jsonify({"error": error}), 400
     editing_content = "config" in data or "whitelist" in data
     if editing_content and default_sync.sync_enabled():
         return (
@@ -543,8 +572,27 @@ def update_default_config(admin: User):
             ),
             409,
         )
-    if not editing_content and publish_allowlist is None:
+    if (
+        not editing_content
+        and publish_allowlist is None
+        and apply_whitelist is None
+        and not sources_sent
+    ):
         return jsonify({"error": "No default list changes"}), 400
+    if publish_allowlist is not None or apply_whitelist is not None or sources_sent:
+        current = allowlist_view(SystemConfig.get_default_config())
+        next_publish = (
+            publish_allowlist
+            if publish_allowlist is not None
+            else SystemConfig.is_allowlist_published()
+        )
+        next_apply = (
+            apply_whitelist
+            if apply_whitelist is not None
+            else current["apply_whitelist_to_blocklists"]
+        )
+        if whitelist_applies_nowhere(next_apply, next_publish):
+            return jsonify({"error": NOWHERE_MESSAGE, "code": NOWHERE_CODE}), 400
     if editing_content:
         try:
             fields = default_config_fields(data)
@@ -570,18 +618,23 @@ def update_default_config(admin: User):
             )
         if fields["whitelist"] is not None:
             current_app.logger.info(f"Admin {admin.username} updated default whitelist")
-    if publish_allowlist is not None:
-        SystemConfig.set_publish_allowlist(publish_allowlist, admin.username)
-        current_app.logger.info(
-            f"Admin {admin.username} set default publish_allowlist={publish_allowlist}"
+    if publish_allowlist is not None or apply_whitelist is not None or sources_sent:
+        SystemConfig.set_allowlist_preferences(
+            admin.username,
+            publish_allowlist=publish_allowlist,
+            apply_whitelist_to_blocklists=apply_whitelist,
+            allowlist_sources=selected,
         )
-    if "whitelist" in data or publish_allowlist is not None:
+    if "whitelist" in data or publish_allowlist is not None or sources_sent:
         sync_default_allowlist()
 
+    saved = allowlist_view(SystemConfig.get_default_config())
     return jsonify(
         {
             "success": True,
             "publish_allowlist": SystemConfig.is_allowlist_published(),
+            "apply_whitelist_to_blocklists": saved["apply_whitelist_to_blocklists"],
+            "allowlist_sources": saved["allowlist_sources"],
         }
     )
 
@@ -817,6 +870,7 @@ def get_library(admin: User):
         entries = BlocklistLibrary.get_all(category=category)
     else:
         entries = BlocklistLibrary.get_all()
+    entries = [entry for entry in entries if entry.list_type != "allow"]
 
     return jsonify(
         {

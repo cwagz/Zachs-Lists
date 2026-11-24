@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "key": "hagezi-referral-native",
+      "name": "HaGeZi Allowlist Referral",
+      "url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/whitelist-referral-native.txt",
+      "description": "Unblocks affiliate and tracking referral links that show up in mail and search results. HaGeZi's stricter blocklists remove some of those links; this native Adblock allowlist puts the referral exceptions back.",
+      "license": "GPL-3.0",
+      "project_url": "https://github.com/hagezi/dns-blocklists"
+    },
+    {
+      "key": "goodnessjson-pihole-whitelist",
+      "name": "GoodnessJSON Pi-hole Whitelist",
+      "url": "https://raw.githubusercontent.com/GoodnessJSON/PiHole-Whitelist/master/lists/whitelist.txt",
+      "description": "Domains that are safe to allow and that restore features large blocklists break, such as YouTube watch history and embedded video. The list leaves out advertising and tracking domains.",
+      "license": "MIT",
+      "project_url": "https://github.com/GoodnessJSON/PiHole-Whitelist"
+    }
+  ]
+}

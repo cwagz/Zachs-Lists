@@ -344,6 +344,38 @@ class User:
             self._data["config"] = {}
         self._data["config"]["publish_allowlist"] = enabled
 
+    def set_allowlist_preferences(
+        self,
+        *,
+        publish_allowlist: bool | None = None,
+        apply_whitelist_to_blocklists: bool | None = None,
+        allowlist_sources: list | None = None,
+    ) -> None:
+        """Store allowlist opt-ins. Omitted fields are left unchanged."""
+        fields: Dict[str, Any] = {}
+        if publish_allowlist is not None:
+            fields["config.publish_allowlist"] = publish_allowlist
+        if apply_whitelist_to_blocklists is not None:
+            fields["config.apply_whitelist_to_blocklists"] = (
+                apply_whitelist_to_blocklists
+            )
+        if allowlist_sources is not None:
+            fields["config.allowlist_sources"] = allowlist_sources
+        if not fields:
+            return
+        fields["updated_at"] = datetime.utcnow()
+        mongo.db[self.COLLECTION].update_one({"_id": self._id}, {"$set": fields})
+        if not isinstance(self._data.get("config"), dict):
+            self._data["config"] = {}
+        if publish_allowlist is not None:
+            self._data["config"]["publish_allowlist"] = publish_allowlist
+        if apply_whitelist_to_blocklists is not None:
+            self._data["config"][
+                "apply_whitelist_to_blocklists"
+            ] = apply_whitelist_to_blocklists
+        if allowlist_sources is not None:
+            self._data["config"]["allowlist_sources"] = allowlist_sources
+
     # List methods
     def get_list(self, name: str) -> Optional[Dict[str, Any]]:
         """Get a specific list by name."""
