@@ -81,6 +81,10 @@ https://lists.zachlagden.uk/u/yourname/all_domains.txt?format=plain
 
 That's it. Your blocklist will auto-update weekly.
 
+### Subscribe to a public allowlist
+
+The whitelist can also include a public allowlist from the catalog. HaGeZi Allowlist Referral (GPL-3.0) and GoodnessJSON Pi-hole Whitelist (MIT) are seeded when those URLs are not already in the library. Nothing is selected until you add it on the Configuration page, under Whitelist. On the next build those domains are added to your own whitelist lines. Apply whitelist to blocklists stays on unless you turn it off, and while it is on the subscribed domains are removed from your blocklists too. Turning that off without publishing the allowlist is refused, because the whitelist would not apply anywhere.
+
 ### Publish a Pi-hole v6 allowlist
 
 On the Config page, opt in to publish the whitelist itself (not only the domains it removes from blocklists). Like your blocklists, that URL is readable by anyone who can reach this instance, and it contains your whitelist entries.

@@ -393,6 +393,27 @@ export interface DefaultConfig {
   config: string;
   whitelist: string;
   publish_allowlist: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: Array<{
+    url: string;
+    name: string;
+    license: string;
+    project_url: string;
+  }>;
+  allowlist_reports?: Array<{
+    url: string;
+    name: string;
+    kept: number | null;
+    warning: string | null;
+    used_cache: boolean;
+  }>;
+  allowlist_catalog?: Array<{
+    url: string;
+    name: string;
+    license: string;
+    project_url: string;
+    description?: string;
+  }>;
   sync_enabled: boolean;
   source: DefaultSyncSource | null;
 }

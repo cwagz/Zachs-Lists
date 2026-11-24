@@ -538,10 +538,17 @@ def test_admin_config_is_editable_while_sync_is_off(
     api: Api, admin_client: FlaskClient
 ) -> None:
     shown = admin_client.get("/api/admin/default/config").get_json()
+    assert sorted(item["license"] for item in shown.pop("allowlist_catalog")) == [
+        "GPL-3.0",
+        "MIT",
+    ]
     assert shown == {
         "config": "",
         "whitelist": "",
         "publish_allowlist": False,
+        "apply_whitelist_to_blocklists": True,
+        "allowlist_sources": [],
+        "allowlist_reports": [],
         "sync_enabled": False,
         "source": None,
     }

@@ -113,6 +113,8 @@ export interface DefaultConfigUpdate {
   config?: string;
   whitelist?: string;
   publish_allowlist?: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: string[];
 }
 
 export interface AdminFeaturedResponse {
@@ -332,7 +334,12 @@ export function fetchDefaultConfig(): Promise<DefaultConfig> {
 
 export function updateDefaultConfig(
   update: DefaultConfigUpdate,
-): Promise<{ success: boolean; publish_allowlist: boolean }> {
+): Promise<{
+  success: boolean;
+  publish_allowlist: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: DefaultConfig['allowlist_sources'];
+}> {
   return put('/api/admin/default/config', update);
 }
 

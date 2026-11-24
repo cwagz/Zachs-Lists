@@ -2,10 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { userAnalyticsQuery } from '../../api/analytics';
 import { jobsQuery } from '../../api/jobs';
 import { userListsQuery } from '../../api/lists';
-import { AllowlistAddresses } from '../../components/lists/AllowlistCard';
 import { Button } from '../../components/ui/Button';
-import { SITE_URL } from '../../config/site';
-import { userAllowlistAddress } from '../../lib/allowlistAddress';
 import { Card } from '../../components/ui/Card';
 import { LoadingRegion, PageHeader, Stack } from '../../components/ui/Layout';
 import { EmptyState, ErrorState } from '../../components/ui/States';
@@ -26,7 +23,8 @@ export default function ListsPage() {
 
   if (!user) return null;
 
-  const hasLists = (lists.data?.lists.length ?? 0) > 0;
+  const hasLists =
+    (lists.data?.lists.length ?? 0) > 0 || Boolean(lists.data?.publish_allowlist);
 
   return (
     <>
@@ -40,12 +38,6 @@ export default function ListsPage() {
         }
       />
       <Stack>
-        {lists.data?.publish_allowlist ? (
-          <AllowlistAddresses
-            subscriptionUrl={userAllowlistAddress(SITE_URL, user.username)}
-            plainUrl={userAllowlistAddress(SITE_URL, user.username, 'plain')}
-          />
-        ) : null}
         {lists.data && hasLists ? (
           <>
             <PublishedLists
@@ -53,10 +45,18 @@ export default function ListsPage() {
               lists={lists.data}
               publishedBuild={publishedJob(jobs.data?.jobs ?? [], lists.data.generation_id)}
               now={now}
+              allowlist={
+                lists.data.publish_allowlist
+                  ? {
+                      ruleCount: lists.data.allowlist?.rule_count ?? null,
+                      publishedAt: lists.data.allowlist?.published_at ?? null,
+                    }
+                  : null
+              }
             />
             <p className="max-w-[78ch] text-[13px] text-text-secondary">
-              Every published list is public. Anyone who has an address can download the list, and
-              the address stays the same after each rebuild.{' '}
+              Anyone with an address can download a published list, and the address stays the same
+              after each rebuild.{' '}
               {analytics.data
                 ? describeDownloads(analytics.data.totals, analytics.data.period_days)
                 : analytics.isError

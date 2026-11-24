@@ -16,6 +16,7 @@ import type { EditorTab } from './editorState';
 import type { EditorView } from './editorView';
 import { SourcesPanel } from './SourcesPanel';
 import type { EditorDraft } from './useEditorDraft';
+import { AllowlistSettings } from './AllowlistSettings';
 import { WhitelistPanel } from './WhitelistPanel';
 
 const LineEditor = lazy(async () => ({
@@ -125,6 +126,9 @@ export function EditorCard({
         className="flex-wrap"
         actions={tab === 'sources' ? addButtons : undefined}
       />
+      {tab === 'whitelist' ? (
+        <AllowlistSettings target="user" patterns={whitelist} />
+      ) : null}
       {tab === 'sources' && limitReason ? (
         <div className="border-b border-border px-[18px] py-3 narrow:px-3">
           <Alert tone="warn" live={false}>

@@ -9,6 +9,11 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
+use crate::allowlist_compose::{
+    filtering_whitelist, interpret_download, publish_allowlist_files, report_documents,
+    AllowlistIdentity,
+};
+use crate::allowlist_render::AllowSourceBody;
 use crate::cancellation::{Cancellation, Cancelled};
 use crate::config::Config;
 use crate::db::cache::content_hash;
@@ -26,7 +31,7 @@ use crate::generation::{
     remove_legacy_flat_files, BuildIdentity, Manifest,
 };
 use crate::generator::COMBINED_LIST_NAME;
-use crate::inputs_digest::{inputs_digest, PROCESSOR_VERSION};
+use crate::inputs_digest::{inputs_digest_with_allowlist, AllowlistDigest, PROCESSOR_VERSION};
 use crate::progress_tracker::{LiveProgress, ProgressTracker};
 use crate::stages::{
     apply_whitelist, extract_source, generate_outputs_with_host, plan_whitelist, CategoryDomains,
@@ -113,6 +118,9 @@ impl From<Cancelled> for BuildError {
 struct BuildConfig {
     blocklists: String,
     whitelist: String,
+    allowlist_sources: Vec<AllowlistIdentity>,
+    apply_whitelist: bool,
+    publish_allowlist: Option<bool>,
 }
 
 /// Main job processor that orchestrates the entire pipeline
@@ -157,13 +165,65 @@ impl JobProcessor {
             return Ok(BuildConfig {
                 blocklists: snapshot.blocklists.clone(),
                 whitelist: snapshot.whitelist.clone().unwrap_or_default(),
+                allowlist_sources: snapshot.allowlist_sources.clone(),
+                apply_whitelist: snapshot.apply_whitelist_to_blocklists.unwrap_or(true),
+                publish_allowlist: snapshot.publish_allowlist,
             });
         }
         let stored = self.user_config_repo.get_config(&job.username).await?;
         Ok(BuildConfig {
             blocklists: stored.blocklists.unwrap_or_default(),
             whitelist: stored.whitelist.unwrap_or_default(),
+            allowlist_sources: stored.allowlist_sources,
+            apply_whitelist: stored.apply_whitelist_to_blocklists.unwrap_or(true),
+            publish_allowlist: stored.publish_allowlist,
         })
+    }
+
+    async fn fetch_allowlists(
+        &self,
+        identities: &[AllowlistIdentity],
+        force: bool,
+    ) -> Vec<AllowSourceBody> {
+        let mut bodies = Vec::with_capacity(identities.len());
+        for identity in identities {
+            if identity.url.trim().is_empty() {
+                continue;
+            }
+            let name = if identity.name.trim().is_empty() {
+                "allowlist".to_string()
+            } else {
+                identity.name.clone()
+            };
+            let download = self
+                .downloader
+                .download_source_reporting(
+                    &Source {
+                        name,
+                        url: identity.url.clone(),
+                        category: None,
+                        abp: false,
+                    },
+                    force,
+                    &|_, _| {},
+                )
+                .await;
+            bodies.push(interpret_download(identity, &download));
+        }
+        bodies
+    }
+
+    async fn record_allowlist_reports(&self, username: &str, sources: &[AllowSourceBody]) {
+        if let Err(error) = self
+            .user_config_repo
+            .record_allowlist_reports(username, report_documents(sources))
+            .await
+        {
+            warn!(
+                "Could not store allowlist fetch status for {}: {:#}",
+                username, error
+            );
+        }
     }
 
     /// Process a single job
@@ -204,6 +264,9 @@ impl JobProcessor {
         let BuildConfig {
             blocklists: config_content,
             whitelist: whitelist_content,
+            allowlist_sources,
+            apply_whitelist: apply_to_blocklists,
+            publish_allowlist,
         } = self.build_config(job).await?;
 
         let sources =
@@ -265,19 +328,40 @@ impl JobProcessor {
 
         self.cancellation.check()?;
 
+        let allow_bodies = self
+            .fetch_allowlists(&allowlist_sources, job.force_rebuild)
+            .await;
+        let allow_hashes: Vec<Option<String>> = allow_bodies
+            .iter()
+            .map(|body| body.content_hash.clone())
+            .collect();
+        let allow_warnings: Vec<String> = allow_bodies
+            .iter()
+            .filter_map(|body| body.warning.clone())
+            .collect();
+        let filter_whitelist =
+            filtering_whitelist(&whitelist_content, &allow_bodies, apply_to_blocklists);
+        let render_whitelist = whitelist_content;
+
         let cancellation = self.cancellation.clone();
         let list_host = self.config.generator_host.clone();
         let digest_host = list_host.clone();
         let (plan, digest) = self
             .stage_thread
             .run(move || {
-                let plan = plan_whitelist(&whitelist_content, extracted, &cancellation)?;
-                let digest = inputs_digest(
+                let plan = plan_whitelist(&filter_whitelist, extracted, &cancellation)?;
+                let digest = inputs_digest_with_allowlist(
                     PROCESSOR_VERSION,
                     &sources,
                     &plan.parsed.whitelist.patterns_as_strings(),
                     &content_hashes,
                     &digest_host,
+                    &AllowlistDigest {
+                        identities: &allowlist_sources,
+                        content_hashes: &allow_hashes,
+                        apply_whitelist: apply_to_blocklists,
+                        publish_allowlist: publish_allowlist.unwrap_or(false),
+                    },
                 );
                 Ok((plan, digest))
             })
@@ -300,6 +384,8 @@ impl JobProcessor {
             if let Some(flusher) = live.take() {
                 flusher.stop().await?;
             }
+            self.record_allowlist_reports(&job.username, &allow_bodies)
+                .await;
             self.job_repo.skip(&job.id, UNCHANGED_SKIP_REASON).await?;
             return Ok(());
         }
@@ -402,6 +488,7 @@ impl JobProcessor {
             ));
         }
         warnings.extend(over_limit_warning);
+        warnings.extend(allow_warnings);
         let result = JobResult {
             sources_processed: downloaded.completed,
             sources_failed: downloaded.failed,
@@ -420,6 +507,24 @@ impl JobProcessor {
             limit: Some(limit),
             ..JobResult::default()
         };
+
+        if let Some(enabled) = publish_allowlist {
+            if let Err(error) = publish_allowlist_files(
+                &output_dir,
+                &render_whitelist,
+                &allow_bodies,
+                enabled,
+                chrono::Utc::now(),
+                &self.config.generator_host,
+            ) {
+                warn!(
+                    "Could not update the published allowlist for {}: {:#}",
+                    job.username, error
+                );
+            }
+        }
+        self.record_allowlist_reports(&job.username, &allow_bodies)
+            .await;
 
         let mut pointer_may_have_moved = false;
         let outcome = self

@@ -1,4 +1,6 @@
+mod allowlist_compose;
 mod allowlist_files;
+mod allowlist_render;
 mod cancellation;
 mod config;
 mod db;

@@ -38,7 +38,6 @@ import { EditorCard, type EditorDialog } from './EditorCard';
 import { ConflictDialog, NoticeAlert, RestoreAlert, TemplateDialog } from './EditorNotices';
 import type { EditorTab } from './editorState';
 import { readEditorView, rememberEditorView, type EditorView } from './editorView';
-import { PublishAllowlist } from './PublishAllowlist';
 import { SaveBar } from './SaveBar';
 import { CheckCard, LimitsCard, type SourceCheckStatus } from './SidePanel';
 import { SourceDialogs } from './SourceDialogs';
@@ -181,7 +180,6 @@ export function ConfigEditor({
           hasPendingRequest={limitRequests?.has_pending ?? false}
           onRequestMore={() => setDialog({ kind: 'limit' })}
         />
-        {tab === 'whitelist' ? <PublishAllowlist /> : null}
         <CheckCard
           tab={tab}
           status={checkStatus}

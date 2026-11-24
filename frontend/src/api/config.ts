@@ -28,14 +28,38 @@ export interface ConfigResponse {
   revision: number;
 }
 
+export interface AllowlistSourceChoice {
+  url: string;
+  name: string;
+  license: string;
+  project_url: string;
+  description?: string;
+}
+
+export interface AllowlistReport {
+  url: string;
+  name: string;
+  kept: number | null;
+  warning: string | null;
+  used_cache: boolean;
+}
+
 export interface WhitelistResponse {
   whitelist: string;
   publish_allowlist: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: AllowlistSourceChoice[];
+  allowlist_reports?: AllowlistReport[];
+  allowlist_catalog?: AllowlistSourceChoice[];
+  default_whitelist?: string;
 }
 
 export interface AllowlistPublication {
   success: boolean;
   publish_allowlist: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: AllowlistSourceChoice[];
+  rebuild_recommended?: boolean;
 }
 
 export interface CategoriesResponse {
@@ -131,10 +155,16 @@ export function saveWhitelist(whitelist: string): Promise<{ success: boolean }> 
   return put<{ success: boolean }>('/api/user/whitelist', { whitelist });
 }
 
+export function saveAllowlistSettings(body: {
+  publish_allowlist?: boolean;
+  apply_whitelist_to_blocklists?: boolean;
+  allowlist_sources?: string[];
+}): Promise<AllowlistPublication> {
+  return put<AllowlistPublication>('/api/user/whitelist', body);
+}
+
 export function saveAllowlistPublication(publishAllowlist: boolean): Promise<AllowlistPublication> {
-  return put<AllowlistPublication>('/api/user/whitelist', {
-    publish_allowlist: publishAllowlist,
-  });
+  return saveAllowlistSettings({ publish_allowlist: publishAllowlist });
 }
 
 export function copyDefaultTemplate(overwrite = false): Promise<TemplateCopied> {

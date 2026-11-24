@@ -16,6 +16,10 @@ def _generator_host() -> str:
 
 
 def sync_user_allowlist(user: User) -> None:
+    # Subscribed sources are rendered by the worker. Rewriting here would
+    # publish the user's lines without those sources.
+    if user.publish_allowlist and _has_subscriptions(user.config):
+        return
     sync_published_allowlist(
         user.get_output_dir(),
         user.get_config("whitelist.txt") or "",
@@ -27,9 +31,18 @@ def sync_user_allowlist(user: User) -> None:
 def sync_default_allowlist() -> None:
     config = SystemConfig.get_default_config()
     output_dir = os.path.join(current_app.config["DEFAULT_DIR"], "output")
+    if config["publish_allowlist"] is True and _has_subscriptions(config):
+        return
     sync_published_allowlist(
         output_dir,
         config["whitelist"] or "",
         config["publish_allowlist"] is True,
         generator=_generator_host(),
     )
+
+
+def _has_subscriptions(config: object) -> bool:
+    if not isinstance(config, dict):
+        return False
+    sources = config.get("allowlist_sources")
+    return isinstance(sources, list) and len(sources) > 0

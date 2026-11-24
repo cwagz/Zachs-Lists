@@ -143,6 +143,9 @@ def test_admitted_job_carries_target_snapshot_and_current_progress_shape(
         "blocklists": VALID_CONFIG,
         "whitelist": "allowed.example.com",
         "revision": 4,
+        "allowlist_sources": [],
+        "apply_whitelist_to_blocklists": True,
+        "publish_allowlist": False,
         "limits": {
             "max_domains": TestingConfig.DEFAULT_MAX_DOMAINS,
             "max_source_lists": TestingConfig.DEFAULT_MAX_SOURCE_LISTS,
@@ -283,6 +286,9 @@ def test_default_build_snapshots_the_stored_default_config(site: Site) -> None:
         "blocklists": VALID_CONFIG,
         "whitelist": "allowed.example.com",
         "revision": None,
+        "allowlist_sources": [],
+        "apply_whitelist_to_blocklists": True,
+        "publish_allowlist": False,
         "limits": None,
     }
 

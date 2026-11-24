@@ -10,12 +10,22 @@ from flask import Blueprint, request, jsonify, current_app
 from app.blueprints.auth import login_required
 from app.extensions import limiter, mongo
 from app.models.user import User
+from app.allowlist import published_allowlist_summary
+from app.allowlist_catalog import NOWHERE_CODE, NOWHERE_MESSAGE
+from app.allowlist_selection import (
+    allowlist_view,
+    resolve_allowlist_selection,
+    whitelist_applies_nowhere,
+)
+from app.models.system_config import SystemConfig
 from app.services.allowlist_publish import sync_user_allowlist
+from app.services.allowlist_seed import allowlist_entries
 from app.models.job import Job
 from app.services.build_admission import AdmissionError, admit_build
 from app.services.job_feed import job_payload, job_payloads
 from app.services.limit_review import enforcing_domain_limit
 from app.utils.validators import (
+    MAX_CONFIG_SOURCES,
     WhitelistValidationUnavailable,
     validate_whitelist,
     validate_config_urls,
@@ -301,6 +311,7 @@ def get_library(user: User):
                 for category, entries in grouped.items()
             },
             "categories": sorted(VALID_CATEGORIES),
+            "allowlists": [entry.to_dict() for entry in allowlist_entries()],
         }
     )
 
@@ -308,12 +319,15 @@ def get_library(user: User):
 @user_bp.route("/whitelist", methods=["GET"])
 @login_required
 def get_whitelist(user: User):
-    """Get user's whitelist and allowlist publication opt-in."""
+    """Get user's whitelist, subscriptions, and allowlist publication opt-in."""
     whitelist = user.get_config("whitelist.txt")
     return jsonify(
         {
             "whitelist": whitelist or "",
             "publish_allowlist": user.publish_allowlist,
+            "default_whitelist": SystemConfig.get_default_config()["whitelist"] or "",
+            "allowlist_catalog": [entry.to_dict() for entry in allowlist_entries()],
+            **allowlist_view(user.config),
         }
     )
 
@@ -321,12 +335,48 @@ def get_whitelist(user: User):
 @user_bp.route("/whitelist", methods=["PUT"])
 @login_required
 def update_whitelist(user: User):
-    """Update the whitelist, the allowlist opt-in, or both."""
+    """Update the whitelist, subscriptions, and the allowlist opt-in."""
     data = json_object()
     publish_allowlist = optional_bool(data, "publish_allowlist")
+    apply_sent = "apply_whitelist_to_blocklists" in data
+    apply_whitelist = (
+        optional_bool(data, "apply_whitelist_to_blocklists") if apply_sent else None
+    )
+    if apply_sent and apply_whitelist is None:
+        return (
+            jsonify({"error": "apply_whitelist_to_blocklists must be a boolean"}),
+            400,
+        )
+    sources_sent = "allowlist_sources" in data
+    selected = None
+    if sources_sent:
+        cap = min(user.limits["max_source_lists"], MAX_CONFIG_SOURCES)
+        selected, error = resolve_allowlist_selection(
+            data.get("allowlist_sources"),
+            [entry.to_dict() for entry in allowlist_entries()],
+            cap,
+        )
+        if error:
+            return jsonify({"error": error}), 400
+
     # A body with no opt-in still has to carry the whitelist, so the existing
-    # field error stays "whitelist". Sending only the boolean updates the flag.
-    updating_text = "whitelist" in data or publish_allowlist is None
+    # field error stays "whitelist". Sending only a boolean updates that flag.
+    updating_text = "whitelist" in data or (
+        publish_allowlist is None and apply_whitelist is None and not sources_sent
+    )
+    current = allowlist_view(user.config if isinstance(user.config, dict) else None)
+    next_publish = (
+        publish_allowlist
+        if publish_allowlist is not None
+        else user.publish_allowlist is True
+    )
+    next_apply = (
+        apply_whitelist
+        if apply_whitelist is not None
+        else current["apply_whitelist_to_blocklists"]
+    )
+    if whitelist_applies_nowhere(next_apply, next_publish):
+        return jsonify({"error": NOWHERE_MESSAGE, "code": NOWHERE_CODE}), 400
 
     if updating_text:
         whitelist = required_text(data, "whitelist")
@@ -362,14 +412,24 @@ def update_whitelist(user: User):
         user.save_config("whitelist.txt", whitelist)
         current_app.logger.info(f"User {user.username} updated whitelist")
 
-    if publish_allowlist is not None and publish_allowlist != user.publish_allowlist:
-        user.set_publish_allowlist(publish_allowlist)
-        current_app.logger.info(
-            f"User {user.username} set publish_allowlist={publish_allowlist}"
+    if publish_allowlist is not None or apply_whitelist is not None or sources_sent:
+        user.set_allowlist_preferences(
+            publish_allowlist=publish_allowlist,
+            apply_whitelist_to_blocklists=apply_whitelist,
+            allowlist_sources=selected,
         )
 
     sync_user_allowlist(user)
-    return jsonify({"success": True, "publish_allowlist": user.publish_allowlist})
+    saved = allowlist_view(user.config if isinstance(user.config, dict) else None)
+    return jsonify(
+        {
+            "success": True,
+            "publish_allowlist": user.publish_allowlist is True,
+            "apply_whitelist_to_blocklists": saved["apply_whitelist_to_blocklists"],
+            "allowlist_sources": saved["allowlist_sources"],
+            "rebuild_recommended": True,
+        }
+    )
 
 
 @user_bp.route("/lists", methods=["GET"])
@@ -387,6 +447,11 @@ def get_lists(user: User):
         {
             "lists": user.serialized_lists(),
             "publish_allowlist": user.publish_allowlist,
+            "allowlist": (
+                published_allowlist_summary(user.get_output_dir())
+                if user.publish_allowlist
+                else None
+            ),
             "published_at": utc_iso(user.published_at),
             "generation_id": user.published_generation,
             "stats": {

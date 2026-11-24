@@ -67,6 +67,11 @@ class SystemConfig:
                 "blocklists": doc.get("blocklists", ""),
                 "whitelist": doc.get("whitelist", ""),
                 "publish_allowlist": doc.get("publish_allowlist") is True,
+                "apply_whitelist_to_blocklists": doc.get(
+                    "apply_whitelist_to_blocklists"
+                ),
+                "allowlist_sources": doc.get("allowlist_sources"),
+                "allowlist_reports": doc.get("allowlist_reports"),
                 "updated_at": doc.get("updated_at"),
                 "updated_by": doc.get("updated_by"),
             }
@@ -74,6 +79,9 @@ class SystemConfig:
             "blocklists": "",
             "whitelist": "",
             "publish_allowlist": False,
+            "apply_whitelist_to_blocklists": None,
+            "allowlist_sources": None,
+            "allowlist_reports": None,
             "updated_at": None,
             "updated_by": None,
         }
@@ -99,6 +107,34 @@ class SystemConfig:
                     "updated_at": datetime.utcnow(),
                     "updated_by": updated_by,
                 },
+                "$setOnInsert": {"blocklists": "", "whitelist": ""},
+            },
+            upsert=True,
+        )
+
+    @classmethod
+    def set_allowlist_preferences(
+        cls,
+        updated_by: str,
+        *,
+        publish_allowlist: bool | None = None,
+        apply_whitelist_to_blocklists: bool | None = None,
+        allowlist_sources: list | None = None,
+    ) -> None:
+        fields: dict[str, Any] = {
+            "updated_at": datetime.utcnow(),
+            "updated_by": updated_by,
+        }
+        if publish_allowlist is not None:
+            fields["publish_allowlist"] = publish_allowlist
+        if apply_whitelist_to_blocklists is not None:
+            fields["apply_whitelist_to_blocklists"] = apply_whitelist_to_blocklists
+        if allowlist_sources is not None:
+            fields["allowlist_sources"] = allowlist_sources
+        mongo.db[cls.COLLECTION].update_one(
+            {"_id": cls.DOC_ID},
+            {
+                "$set": fields,
                 "$setOnInsert": {"blocklists": "", "whitelist": ""},
             },
             upsert=True,

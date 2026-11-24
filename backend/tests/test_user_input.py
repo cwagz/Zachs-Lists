@@ -324,7 +324,11 @@ def test_lists_report_the_next_rebuild_and_no_check_before_any_build(
     body = client.get("/api/user/lists").get_json()
     after = USER_REBUILD.next_after(datetime.utcnow())
 
-    assert set(body) == EXISTING_LISTS_KEYS | {"next_rebuild_at", "last_checked_at"}
+    assert set(body) == EXISTING_LISTS_KEYS | {
+        "next_rebuild_at",
+        "last_checked_at",
+        "allowlist",
+    }
     assert body["last_checked_at"] is None
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T07:30:00\.000Z", body["next_rebuild_at"])
     next_rebuild = datetime.strptime(body["next_rebuild_at"], "%Y-%m-%dT%H:%M:%S.%fZ")

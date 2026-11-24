@@ -5,6 +5,7 @@ import { get } from './http';
 export interface UserListsResponse {
   lists: UserList[];
   publish_allowlist: boolean;
+  allowlist?: { rule_count: number | null; published_at: string | null } | null;
   published_at: string | null;
   generation_id: string | null;
   stats: UserStats;

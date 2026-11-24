@@ -81,6 +81,21 @@ class BlocklistLibrary:
     def updated_at(self) -> datetime:
         return self._data.get("updated_at", datetime.utcnow())
 
+    @property
+    def list_type(self) -> str:
+        value = self._data.get("list_type")
+        return value if isinstance(value, str) and value else "block"
+
+    @property
+    def license(self) -> str:
+        value = self._data.get("license")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def project_url(self) -> str:
+        value = self._data.get("project_url")
+        return value if isinstance(value, str) else ""
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API responses."""
         return {
@@ -93,6 +108,9 @@ class BlocklistLibrary:
             "aggressiveness": self.aggressiveness,
             "domain_count": self.domain_count,
             "added_by": self.added_by,
+            "list_type": self.list_type,
+            "license": self.license,
+            "project_url": self.project_url,
             "created_at": utc_iso(self.created_at),
             "updated_at": utc_iso(self.updated_at),
         }
@@ -137,6 +155,8 @@ class BlocklistLibrary:
         entries = cls.get_all()
         grouped: Dict[str, List["BlocklistLibrary"]] = {}
         for entry in entries:
+            if entry.list_type == "allow":
+                continue
             if entry.category not in grouped:
                 grouped[entry.category] = []
             grouped[entry.category].append(entry)
