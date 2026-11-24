@@ -1,13 +1,22 @@
 use anyhow::{anyhow, Result};
-use bson::doc;
+use bson::{doc, Document};
 use mongodb::{Collection, Database};
 use serde::Deserialize;
+
+use crate::allowlist_compose::AllowlistIdentity;
+use crate::config::DEFAULT_TARGET;
 
 /// User config embedded in user document
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserConfig {
     pub blocklists: Option<String>,
     pub whitelist: Option<String>,
+    #[serde(default)]
+    pub allowlist_sources: Vec<AllowlistIdentity>,
+    #[serde(default)]
+    pub apply_whitelist_to_blocklists: Option<bool>,
+    #[serde(default)]
+    pub publish_allowlist: Option<bool>,
 }
 
 /// User document projection for config retrieval
@@ -21,6 +30,12 @@ struct UserDoc {
 struct SystemConfigDoc {
     pub blocklists: Option<String>,
     pub whitelist: Option<String>,
+    #[serde(default)]
+    pub allowlist_sources: Vec<AllowlistIdentity>,
+    #[serde(default)]
+    pub apply_whitelist_to_blocklists: Option<bool>,
+    #[serde(default)]
+    pub publish_allowlist: Option<bool>,
 }
 
 /// Repository for fetching user and system configurations from MongoDB
@@ -43,7 +58,7 @@ impl UserConfigRepository {
     /// For username "__default__", fetches from system_config collection.
     /// For regular users, fetches from their user document.
     pub async fn get_config(&self, username: &str) -> Result<UserConfig> {
-        if username == "__default__" {
+        if username == DEFAULT_TARGET {
             self.get_default_config().await
         } else {
             self.get_user_config(username).await
@@ -77,6 +92,35 @@ impl UserConfigRepository {
         Ok(UserConfig {
             blocklists: config.blocklists,
             whitelist: config.whitelist,
+            allowlist_sources: config.allowlist_sources,
+            apply_whitelist_to_blocklists: config.apply_whitelist_to_blocklists,
+            publish_allowlist: config.publish_allowlist,
         })
+    }
+
+    pub async fn record_allowlist_reports(
+        &self,
+        username: &str,
+        reports: Vec<Document>,
+    ) -> Result<()> {
+        let update = if username == DEFAULT_TARGET {
+            self.system_config_collection
+                .update_one(
+                    doc! { "_id": "default_config" },
+                    doc! { "$set": { "allowlist_reports": reports } },
+                )
+                .await?
+        } else {
+            self.users_collection
+                .update_one(
+                    doc! { "username": username },
+                    doc! { "$set": { "config.allowlist_reports": reports } },
+                )
+                .await?
+        };
+        if update.matched_count == 0 {
+            anyhow::bail!("No config document for {username}");
+        }
+        Ok(())
     }
 }

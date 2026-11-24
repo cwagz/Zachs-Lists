@@ -26,6 +26,12 @@ pub struct ConfigSnapshot {
     #[serde(default)]
     pub whitelist: Option<String>,
     #[serde(default)]
+    pub allowlist_sources: Vec<crate::allowlist_compose::AllowlistIdentity>,
+    #[serde(default)]
+    pub apply_whitelist_to_blocklists: Option<bool>,
+    #[serde(default)]
+    pub publish_allowlist: Option<bool>,
+    #[serde(default)]
     pub limits: Option<SnapshotLimits>,
 }
 
