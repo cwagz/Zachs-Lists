@@ -89,6 +89,61 @@ impl OutputFormat {
     }
 }
 
+/// Adblock options that do not change a DNS block. A stored rule whose
+/// options are all in this set is written as `||domain^`.
+///
+/// `$all` blocks every request type, which is what a DNS block already does.
+/// `$important` only outranks exception rules in a browser. The whitelist has
+/// already removed those domains, and Pi-hole v6 drops a line that keeps the
+/// option. `$document` / `$doc` and `$popup` are browser request kinds.
+/// `$third-party` / `$3p` limit the rule to request context a resolver cannot
+/// see. The extractor still refuses `$third-party` before a domain is
+/// admitted, so listing it here does not start blocking first-party traffic.
+/// `$3p` is the same option and is not in that skip list; a domain it already
+/// admitted stays blocked and the option is removed.
+const STRIPPED_ADBLOCK_MODIFIERS: &[&str] = &[
+    "3p",
+    "all",
+    "doc",
+    "document",
+    "important",
+    "popup",
+    "third-party",
+];
+
+fn adblock_option_is_stripped(option: &str) -> bool {
+    let name = option
+        .split_once('=')
+        .map(|(name, _)| name)
+        .unwrap_or(option)
+        .trim();
+    !name.is_empty()
+        && !name.starts_with('~')
+        && STRIPPED_ADBLOCK_MODIFIERS
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+}
+
+/// True when `raw` has no `$` options, or every option is in
+/// [`STRIPPED_ADBLOCK_MODIFIERS`]. A negated option, or any other name,
+/// is not neutral: copying it would be wrong, and so would inventing a
+/// block the extractor had not already admitted.
+fn raw_adblock_rule_is_dns_neutral(raw: &str) -> bool {
+    match raw.split_once('$') {
+        None => true,
+        Some((_, options)) => {
+            !options.is_empty() && options.split(',').all(adblock_option_is_stripped)
+        }
+    }
+}
+
+/// A stored rule is copied only when it has no `$` options. Neutral options
+/// are stripped instead, and any other option is dropped with the raw text.
+/// Both of those are written as `||domain^`.
+fn raw_adblock_rule_can_be_copied(raw: &str) -> bool {
+    raw_adblock_rule_is_dns_neutral(raw) && !raw.contains('$')
+}
+
 /// Output file generator
 pub struct OutputGenerator {
     output_dir: PathBuf,
@@ -124,9 +179,15 @@ impl OutputGenerator {
         )
     }
 
-    /// Write a domain directly to encoder without intermediate String allocation
-    /// For hosts/plain: always uses domain format
-    /// For adblock: uses raw_rule if available, otherwise generates ||domain^
+    /// Write one domain line, without building an intermediate String.
+    ///
+    /// Hosts and plain use the domain only. Adblock is `||domain^`, which is
+    /// the block Pi-hole v6 and AdGuard Home both accept. A stored rule with
+    /// no `$` is copied. Options in [`STRIPPED_ADBLOCK_MODIFIERS`] are
+    /// stripped, and any other option is discarded with the raw rule. The
+    /// domain stays a block, because the extractor already admitted it and
+    /// hosts and plain already block it. Pi-hole ignores a line that still
+    /// has `$`.
     #[inline]
     fn write_domain<W: Write, R: AsRef<str>>(
         encoder: &mut W,
@@ -145,15 +206,17 @@ impl OutputGenerator {
                 encoder.write_all(b"\n")?;
             }
             OutputFormat::Adblock => {
-                // For adblock format, use raw rule if available (preserves modifiers)
-                if let Some(rules) = adblock_rules {
-                    if let Some(raw_rule) = rules.get(domain) {
-                        encoder.write_all(raw_rule.as_ref().as_bytes())?;
-                        encoder.write_all(b"\n")?;
-                        return Ok(());
-                    }
+                if let Some(raw_rule) = adblock_rules
+                    .and_then(|rules| rules.get(domain))
+                    .filter(|raw_rule| raw_adblock_rule_can_be_copied(raw_rule.as_ref()))
+                {
+                    // No `$` options. Keep the stored line, including its casing.
+                    encoder.write_all(raw_rule.as_ref().as_bytes())?;
+                    encoder.write_all(b"\n")?;
+                    return Ok(());
                 }
-                // Fallback: generate standard adblock format (for hosts/plain sources)
+                // No stored rule, a neutral `$` option, or an option that
+                // would change the block. The raw text is not copied.
                 encoder.write_all(b"||")?;
                 encoder.write_all(domain.as_bytes())?;
                 encoder.write_all(b"^\n")?;
@@ -311,6 +374,29 @@ mod tests {
     }
 
     #[test]
+    fn test_write_domain_adblock_dollar_all_is_not_copied() {
+        let mut rules = HashMap::new();
+        rules.insert("x.example".to_string(), "||x.example^$all".to_string());
+        let rules = Some(&rules);
+
+        // Pi-hole v6 ignores a rule that still has `$all`, so the domain is
+        // not blocked. The adblock line is `||domain^`. Hosts and plain
+        // already blocked the domain and stay as they are.
+        let mut adblock = Vec::new();
+        OutputGenerator::write_domain(&mut adblock, OutputFormat::Adblock, "x.example", rules)
+            .unwrap();
+        assert_eq!(String::from_utf8(adblock).unwrap(), "||x.example^\n");
+
+        let mut hosts = Vec::new();
+        OutputGenerator::write_domain(&mut hosts, OutputFormat::Hosts, "x.example", rules).unwrap();
+        assert_eq!(String::from_utf8(hosts).unwrap(), "0.0.0.0 x.example\n");
+
+        let mut plain = Vec::new();
+        OutputGenerator::write_domain(&mut plain, OutputFormat::Plain, "x.example", rules).unwrap();
+        assert_eq!(String::from_utf8(plain).unwrap(), "x.example\n");
+    }
+
+    #[test]
     fn test_write_domain_adblock_with_rule() {
         let mut buf = Vec::new();
         let mut rules = HashMap::new();
@@ -319,17 +405,30 @@ mod tests {
             "||example.com^$important".to_string(),
         );
 
-        // Has adblock rule - preserves original with modifiers
+        // `$important` only outranks exception rules in a browser. Pi-hole v6
+        // drops the whole line when the option is kept, and the whitelist has
+        // already removed allowed domains, so there is no exception left to
+        // outrank. Keeping the option would hide the block.
         OutputGenerator::write_domain(&mut buf, OutputFormat::Adblock, "example.com", Some(&rules))
             .unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "||example.com^$important\n"
+        assert_eq!(String::from_utf8(buf).unwrap(), "||example.com^\n");
+
+        // AdGuard's DNS filter stores some of these without a caret. Pi-hole
+        // requires the final character to be `^`, so the missing caret is
+        // restored from the normalized domain.
+        let mut rules = HashMap::new();
+        rules.insert(
+            "deloton.com".to_string(),
+            "||deloton.com$important".to_string(),
         );
+        let mut buf = Vec::new();
+        OutputGenerator::write_domain(&mut buf, OutputFormat::Adblock, "deloton.com", Some(&rules))
+            .unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "||deloton.com^\n");
     }
 
     #[test]
-    fn test_write_domain_adblock_preserves_complex_rule() {
+    fn test_write_domain_adblock_strips_combined_neutral_modifiers() {
         let mut buf = Vec::new();
         let mut rules = HashMap::new();
         rules.insert(
@@ -339,10 +438,56 @@ mod tests {
 
         OutputGenerator::write_domain(&mut buf, OutputFormat::Adblock, "tracker.com", Some(&rules))
             .unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "||tracker.com^$all,important\n"
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), "||tracker.com^\n");
+    }
+
+    fn written_adblock(raw: &str) -> String {
+        let mut rules = HashMap::new();
+        rules.insert("x.example".to_string(), raw.to_string());
+        let mut buf = Vec::new();
+        OutputGenerator::write_domain(&mut buf, OutputFormat::Adblock, "x.example", Some(&rules))
+            .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn adblock_modifier_policy_strips_neutral_options_and_drops_the_rest() {
+        let neutral = [
+            "||x.example^",
+            "||x.example^$all",
+            "||x.example^$ALL",
+            "||x.example^$important",
+            "||x.example^$all,important",
+            "||x.example^$document",
+            "||x.example^$doc",
+            "||x.example^$popup",
+            "||x.example^$third-party",
+            "||x.example^$3p",
+            "||x.example^$document,popup,3p",
+        ];
+        // These change what a plain `||domain^` means. The extractor still
+        // admits the ones it admits today; the raw text is not copied, and
+        // the domain line matches the hosts and plain block.
+        let changing = [
+            "||x.example^$badfilter",
+            "||x.example^$denyallow=keep.example",
+            "||x.example^$client=127.0.0.1",
+            "||x.example^$ctag=kids",
+            "||x.example^$dnstype=A",
+            "||x.example^$dnsrewrite=127.0.0.1",
+            "||x.example^$domain=other.example",
+            "||x.example^$~third-party",
+            "||x.example^$all,~document",
+        ];
+        for raw in neutral {
+            assert!(raw_adblock_rule_is_dns_neutral(raw), "{raw}");
+            assert_eq!(written_adblock(raw), "||x.example^\n", "{raw}");
+        }
+        for raw in changing {
+            assert!(!raw_adblock_rule_is_dns_neutral(raw), "{raw}");
+            assert_eq!(written_adblock(raw), "||x.example^\n", "{raw}");
+            assert!(!written_adblock(raw).contains('$'), "{raw}");
+        }
     }
 
     fn collect_events(
@@ -413,7 +558,8 @@ mod tests {
             &mut adblock,
         )
         .unwrap();
-        assert!(adblock.contains("||ads.example.com^$important\n||plain.example.com^\n"));
+        assert!(adblock.contains("||ads.example.com^\n||plain.example.com^\n"));
+        assert!(!adblock.contains('$'));
     }
 
     #[test]

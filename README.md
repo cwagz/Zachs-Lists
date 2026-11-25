@@ -177,6 +177,8 @@ Works with any DNS blocker or browser extension that accepts blocklists:
 | **NextDNS**       | plain                      |
 | **ControlD**      | plain                      |
 
+Adblock lists are written as `||domain^`. Pi-hole v6 and AdGuard Home block that form. A `$` option is not copied: Pi-hole ignores any rule that contains one, so the domain would not be blocked.
+
 If it accepts a URL to a blocklist, it'll work with Zach's Lists.
 
 ---

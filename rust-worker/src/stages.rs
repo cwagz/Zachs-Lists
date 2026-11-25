@@ -70,8 +70,9 @@ pub struct CategoryDomains {
     /// Map from category name to domains in that category
     /// None key = uncategorized sources
     pub by_category: HashMap<Option<String>, HashSet<String>>,
-    /// Raw adblock rules keyed by domain (for adblock output passthrough)
-    /// Only populated for domains that came from adblock-format sources
+    /// Raw adblock rules keyed by domain, from adblock-format sources only.
+    /// A later source replaces an earlier one. Generation does not copy `$`
+    /// options from the stored text.
     pub adblock_rules: HashMap<String, RankedRule>,
 }
 
