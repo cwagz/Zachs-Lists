@@ -104,12 +104,32 @@ impl DomainExtractor {
     /// Create a new domain extractor
     pub fn new() -> Self {
         Self {
-            // Matches: 0.0.0.0 domain.com or 127.0.0.1 domain.com
-            hosts_pattern: Regex::new(r"^(?:0\.0\.0\.0|127\.0\.0\.1)\s+([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)").unwrap(),
+            // Any IPv4 or IPv6, then a domain. Trailing " # comment" is removed first.
+            hosts_pattern: Regex::new(concat!(
+                r"^(?:(?:[0-9]{1,3}\.){3}[0-9]{1,3}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,7}:|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|",
+                r"(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|",
+                r"[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){1,6}|",
+                r":(?::[0-9A-Fa-f]{1,4}){1,7}|",
+                r"::)\s+",
+                r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)"
+            ))
+            .unwrap(),
             // Matches: just a domain on its own line
-            plain_pattern: Regex::new(r"^([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)$").unwrap(),
+            plain_pattern: Regex::new(
+                r"^([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)$",
+            )
+            .unwrap(),
             // Matches: ||domain.com^ or ||domain.com^$... (captures domain and optional modifiers)
-            adblock_pattern: Regex::new(r"^\|\|([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)\^?(\$.+)?$").unwrap(),
+            adblock_pattern: Regex::new(
+                r"^\|\|([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)\^?(\$.+)?$",
+            )
+            .unwrap(),
             // Matches comment lines
             comment_pattern: Regex::new(r"^[#!]").unwrap(),
             // Matches CSS/cosmetic filter rules (element hiding - not DNS level)
@@ -118,8 +138,14 @@ impl DomainExtractor {
             // $third-party = context-aware blocking (can't do at DNS level)
             // $badfilter = exception rule that DISABLES a blocking rule
             // $removeparam, $redirect, $csp, $replace, $cookie = browser-level features
-            skip_modifiers_pattern: Regex::new(r"(?i)\$(.*,)?(third-party|badfilter|removeparam|redirect|csp|replace|cookie)").unwrap(),
-            abp_wildcard_pattern: Regex::new(r"^\*\.([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)$").unwrap(),
+            skip_modifiers_pattern: Regex::new(
+                r"(?i)\$(.*,)?(third-party|badfilter|removeparam|redirect|csp|replace|cookie)",
+            )
+            .unwrap(),
+            abp_wildcard_pattern: Regex::new(
+                r"^\*\.([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)$",
+            )
+            .unwrap(),
         }
     }
 
@@ -157,8 +183,9 @@ impl DomainExtractor {
             return None;
         }
 
-        // Try hosts format first (most common)
-        if let Some(caps) = self.hosts_pattern.captures(line) {
+        // Try hosts format first (most common). " # comment" is not part of the domain.
+        let hosts_line = without_trailing_comment(line);
+        if let Some(caps) = self.hosts_pattern.captures(hosts_line) {
             if let Some(domain) = caps.get(1) {
                 return Some((
                     ExtractionResult {
@@ -190,8 +217,9 @@ impl DomainExtractor {
             }
         }
 
-        // Try plain domain
-        if let Some(caps) = self.plain_pattern.captures(line) {
+        // Plain domains may carry a trailing " # comment" (for example Botvrij IOC).
+        let plain_line = without_trailing_comment(line);
+        if let Some(caps) = self.plain_pattern.captures(plain_line) {
             if let Some(domain) = caps.get(1) {
                 return Some((
                     ExtractionResult {
@@ -260,6 +288,14 @@ impl DomainExtractor {
         let mut sorted: Vec<String> = domains.into_iter().collect();
         sorted.par_sort_unstable();
         sorted
+    }
+}
+
+/// Drop a trailing ` # comment`. The space on both sides of `#` is required.
+fn without_trailing_comment(line: &str) -> &str {
+    match line.find(" # ") {
+        Some(index) => line[..index].trim_end(),
+        None => line,
     }
 }
 
@@ -558,5 +594,56 @@ mod tests {
         assert!(extractor
             .extract(&content, false, &cancelled, &|_| {})
             .is_err());
+    }
+
+    #[test]
+    fn any_ip_hosts_prefix_and_trailing_comments() {
+        let extractor = DomainExtractor::new();
+        let hosts = [
+            "0.0.0.0 ads.example.com",
+            "127.0.0.1 ads.example.com",
+            "195.187.6.53 ads.example.com",
+            "255.255.255.255 ads.example.com",
+            "10.1.2.3 ads.example.com",
+            "::1 ads.example.com",
+            ":: ads.example.com",
+            "2001:db8::1 ads.example.com",
+            "fe80::1 ads.example.com",
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334 ads.example.com",
+            "195.187.6.53 ads.example.com # cert note",
+            "0.0.0.0 ads.example.com # legacy note",
+        ];
+        for line in hosts {
+            let (result, format) = extractor
+                .extract_domain(line)
+                .unwrap_or_else(|| panic!("expected a domain from {line}"));
+            assert_eq!(result.domain, "ads.example.com", "{line}");
+            assert_eq!(result.raw_adblock_rule, None, "{line}");
+            assert_eq!(format, DetectedFormat::Hosts, "{line}");
+        }
+
+        let (plain, format) = extractor
+            .extract_domain("tracker.example.com # botnet c2")
+            .unwrap();
+        assert_eq!(plain.domain, "tracker.example.com");
+        assert_eq!(plain.raw_adblock_rule, None);
+        assert_eq!(format, DetectedFormat::Plain);
+
+        assert_eq!(extractor.extract_domain("not-an-ip ads.example.com"), None);
+        assert_eq!(extractor.extract_domain("# ads.example.com"), None);
+        assert_eq!(
+            extractor.extract_domain("ads.example.com#not-a-comment"),
+            None
+        );
+        assert_eq!(
+            extractor.extract_domain("||ads.example.com^$third-party"),
+            None
+        );
+        let (rule, format) = extractor.extract_domain("||ads.example.com^").unwrap();
+        assert_eq!(
+            rule.raw_adblock_rule,
+            Some("||ads.example.com^".to_string())
+        );
+        assert_eq!(format, DetectedFormat::Adblock);
     }
 }
