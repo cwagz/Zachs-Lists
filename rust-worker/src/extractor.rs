@@ -469,7 +469,8 @@ mod tests {
     fn test_valid_modifiers_preserved() {
         let extractor = DomainExtractor::new();
 
-        // $important and other valid DNS-compatible modifiers should be preserved
+        // The extractor still stores `$important` and `$all`. Adblock output
+        // strips them; see the generator.
         let result = extractor.extract_domain("||ads.example.com^$important");
         assert!(result.is_some());
         let (extraction, format) = result.unwrap();
@@ -488,6 +489,41 @@ mod tests {
             Some("||malware.com^$all".to_string())
         );
         assert_eq!(format, DetectedFormat::Adblock);
+    }
+
+    #[test]
+    fn meaning_changing_options_keep_the_current_extractor_gate() {
+        let extractor = DomainExtractor::new();
+
+        // Not a DNS block. These stay out of every output, so a later
+        // `||domain^` rewrite cannot start blocking them.
+        for line in [
+            "||facebook.com^$third-party",
+            "||facebook.com^$3p,third-party",
+            "||facebook.com^$badfilter",
+            "@@||facebook.com^",
+            "@@||facebook.com^$important",
+        ] {
+            assert_eq!(extractor.extract_domain(line), None, "{line}");
+        }
+
+        // Admitted today, so hosts and plain already block the domain.
+        // The raw rule is still stored. Adblock output does not copy it.
+        for line in [
+            "||ads.example^$denyallow=keep.example",
+            "||ads.example^$client=127.0.0.1",
+            "||ads.example^$ctag=kids",
+            "||ads.example^$dnstype=A",
+            "||ads.example^$dnsrewrite=127.0.0.1",
+            "||ads.example^$domain=other.example",
+            "||ads.example^$~third-party",
+            "||ads.example^$3p",
+        ] {
+            let (extraction, format) = extractor.extract_domain(line).expect(line);
+            assert_eq!(format, DetectedFormat::Adblock, "{line}");
+            assert_eq!(extraction.domain, "ads.example");
+            assert_eq!(extraction.raw_adblock_rule.as_deref(), Some(line));
+        }
     }
 
     #[test]

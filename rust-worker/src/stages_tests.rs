@@ -524,7 +524,7 @@ fn wildcard_line_of_an_abp_source_reaches_all_three_output_formats() {
         adblock,
         [
             "||plain.example.com^",
-            "||rule.example.com^$important",
+            "||rule.example.com^",
             "||wild.example.com^"
         ]
     );
@@ -538,10 +538,7 @@ fn wildcard_line_of_a_source_without_the_abp_flag_is_still_dropped() {
         ["0.0.0.0 plain.example.com", "0.0.0.0 rule.example.com"]
     );
     assert_eq!(plain, ["plain.example.com", "rule.example.com"]);
-    assert_eq!(
-        adblock,
-        ["||plain.example.com^", "||rule.example.com^$important"]
-    );
+    assert_eq!(adblock, ["||plain.example.com^", "||rule.example.com^"]);
 }
 
 #[test]
