@@ -47,3 +47,5 @@ Coolify builds the root `Dockerfile` and is set to deploy on every push to `main
 ## Versioning
 
 A release bumps `frontend/package.json`, and `rust-worker/Cargo.toml` with `rust-worker/Cargo.lock`. The two carry separate version numbers. The backend has none.
+
+Raise `PROCESSOR_VERSION` in `rust-worker/src/inputs_digest.rs` whenever generated output bytes change for the same inputs (format, normalization, headers). It is part of the build inputs digest, and a matching digest skips publishing.
