@@ -79,6 +79,10 @@ https://lists.zachlagden.uk/u/yourname/all_domains.txt?format=adblock
 https://lists.zachlagden.uk/u/yourname/all_domains.txt?format=plain
 ```
 
+Pi-hole v6 can subscribe to the Adblock file. That file keeps `||domain^` rules from adblock-format sources, including subdomain coverage. The hosts and plain files write only the domain from the rule (`example.com` from `||example.com^`). Use Adblock when you want those sources unchanged.
+
+An existing install can update stored source URLs from the command line. See [Updating stored source URLs](docs/source-urls.md).
+
 That's it. Your blocklist will auto-update weekly.
 
 ### Subscribe to a public allowlist
