@@ -11,7 +11,10 @@ pub struct AllowlistDigest<'a> {
     pub publish_allowlist: bool,
 }
 
-pub const PROCESSOR_VERSION: u32 = 1;
+/// Must be raised whenever generated output bytes change for the same inputs
+/// (format, normalization, headers). The value is part of the build inputs
+/// digest, so a build whose digest matches the published manifest is skipped.
+pub const PROCESSOR_VERSION: u32 = 2;
 const FAILED_SOURCE_MARKER: &str = "source-failed";
 const NO_CATEGORY_MARKER: &str = "";
 
